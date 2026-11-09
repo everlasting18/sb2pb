@@ -74,6 +74,14 @@ homebrew_casks:
     homepage: https://github.com/everlasting18/sb2pb
     description: Migrate a Supabase project to PocketBase
     license: MIT
+    # The binary is not signed or notarized by Apple, and Homebrew quarantines
+    # cask downloads, so Gatekeeper would block the first run. Clear the flag.
+    hooks:
+      post:
+        install_steps: |
+          on_macos do
+            run "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "{{ .StagedPath }}/sb2pb"]
+          end
 
 scoops:
   - name: sb2pb
