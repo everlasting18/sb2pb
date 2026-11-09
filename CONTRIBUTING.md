@@ -68,5 +68,5 @@ Types: `feat` (new behaviour), `fix` (bug), `docs`, `test`, `refactor` (no behav
 Move the "Unreleased" entries in `CHANGELOG.md` under the new version, then tag `vX.Y.Z` and push
 the tag (`v0.2.0` for new features, `v0.1.1` for fixes only). The release workflow builds binaries for macOS, Linux and Windows,
 signs the checksums, publishes the Docker image and updates the Homebrew tap and Scoop bucket.
-It needs a `HOMEBREW_TAP_TOKEN` secret with write access to `pocketbasecloud/homebrew-tap` and
-`pocketbasecloud/scoop-bucket`.
+It needs a `HOMEBREW_TAP_TOKEN` secret with write access to `everlasting18/homebrew-tap` and
+`everlasting18/scoop-bucket`.

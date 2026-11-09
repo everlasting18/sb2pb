@@ -3,7 +3,7 @@ package main
 import (
 	"os"
 
-	"github.com/pocketbasecloud/sb2pb/internal/app"
+	"github.com/everlasting18/sb2pb/internal/app"
 )
 
 // version is set at release time: -ldflags "-X main.version=v0.1.0"

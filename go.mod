@@ -1,4 +1,4 @@
-module github.com/pocketbasecloud/sb2pb
+module github.com/everlasting18/sb2pb
 
 go 1.27
 

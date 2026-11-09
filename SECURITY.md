@@ -23,7 +23,7 @@ Release checksums are signed with Sigstore keyless signing from the release work
 
 ```sh
 cosign verify-blob --bundle checksums.txt.sigstore.json \
-  --certificate-identity-regexp 'https://github.com/pocketbasecloud/sb2pb/' \
+  --certificate-identity-regexp 'https://github.com/everlasting18/sb2pb/' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com checksums.txt
 sha256sum -c checksums.txt --ignore-missing
 ```

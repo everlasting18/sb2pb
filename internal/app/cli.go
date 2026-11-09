@@ -39,7 +39,7 @@ Environment variables (used instead of prompts; secrets are never taken as flags
   PB_SUPERUSER_EMAIL      PocketBase superuser email
   PB_SUPERUSER_PASSWORD   PocketBase superuser password
 
-Docs: https://github.com/pocketbasecloud/sb2pb
+Docs: https://github.com/everlasting18/sb2pb
 `
 
 // Main runs the CLI and returns the process exit code.

@@ -53,7 +53,7 @@ signs:
 dockers_v2:
   - id: sb2pb
     images:
-      - ghcr.io/pocketbasecloud/sb2pb
+      - ghcr.io/everlasting18/sb2pb
     tags:
       - "{{ .Version }}"
       - latest
@@ -62,26 +62,26 @@ dockers_v2:
       - linux/arm64
     dockerfile: Dockerfile
     labels:
-      org.opencontainers.image.source: https://github.com/pocketbasecloud/sb2pb
+      org.opencontainers.image.source: https://github.com/everlasting18/sb2pb
       org.opencontainers.image.licenses: MIT
 
 homebrew_casks:
   - name: sb2pb
     repository:
-      owner: pocketbasecloud
+      owner: everlasting18
       name: homebrew-tap
       token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
-    homepage: https://github.com/pocketbasecloud/sb2pb
+    homepage: https://github.com/everlasting18/sb2pb
     description: Migrate a Supabase project to PocketBase
     license: MIT
 
 scoops:
   - name: sb2pb
     repository:
-      owner: pocketbasecloud
+      owner: everlasting18
       name: scoop-bucket
       token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
-    homepage: https://github.com/pocketbasecloud/sb2pb
+    homepage: https://github.com/everlasting18/sb2pb
     description: Migrate a Supabase project to PocketBase
     license: MIT
 
@@ -95,4 +95,4 @@ changelog:
 
 release:
   footer: |
-    Verify a download: `cosign verify-blob --bundle checksums.txt.sigstore.json --certificate-identity-regexp 'https://github.com/pocketbasecloud/sb2pb/' --certificate-oidc-issuer https://token.actions.githubusercontent.com checksums.txt`, then `sha256sum -c checksums.txt --ignore-missing`.
+    Verify a download: `cosign verify-blob --bundle checksums.txt.sigstore.json --certificate-identity-regexp 'https://github.com/everlasting18/sb2pb/' --certificate-oidc-issuer https://token.actions.githubusercontent.com checksums.txt`, then `sha256sum -c checksums.txt --ignore-missing`.

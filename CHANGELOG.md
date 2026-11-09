@@ -28,5 +28,5 @@ First public release. Embeds PocketBase v0.41.1.
 - A version check that accepts a PocketBase server with the same data format as the embedded release.
 - macOS, Linux and Windows binaries, Docker image, Homebrew cask, Scoop manifest, signed checksums.
 
-[Unreleased]: https://github.com/pocketbasecloud/sb2pb/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/pocketbasecloud/sb2pb/releases/tag/v0.1.0
+[Unreleased]: https://github.com/everlasting18/sb2pb/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/everlasting18/sb2pb/releases/tag/v0.1.0

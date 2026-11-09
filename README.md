@@ -1,5 +1,10 @@
 # sb2pb
 
+[![CI](https://github.com/everlasting18/sb2pb/actions/workflows/ci.yml/badge.svg)](https://github.com/everlasting18/sb2pb/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/everlasting18/sb2pb)](https://github.com/everlasting18/sb2pb/releases)
+[![Go Reference](https://pkg.go.dev/badge/github.com/everlasting18/sb2pb.svg)](https://pkg.go.dev/github.com/everlasting18/sb2pb)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 Move a Supabase project to PocketBase with one command: schema, users (they keep their passwords),
 data, Storage files and Row Level Security policies.
 
@@ -54,14 +59,14 @@ The same app before and after the move ([how](docs/use-cases.md#the-whole-move-s
 ## Install
 
 ```sh
-brew install pocketbasecloud/tap/sb2pb                    # macOS, Linux
-scoop bucket add pocketbasecloud https://github.com/pocketbasecloud/scoop-bucket
+brew install everlasting18/tap/sb2pb                    # macOS, Linux
+scoop bucket add everlasting18 https://github.com/everlasting18/scoop-bucket
 scoop install sb2pb                                       # Windows
-go install github.com/pocketbasecloud/sb2pb/cmd/sb2pb@latest
-docker run --rm -it --user "$(id -u):$(id -g)" -v "$PWD:/work" ghcr.io/pocketbasecloud/sb2pb
+go install github.com/everlasting18/sb2pb/cmd/sb2pb@latest
+docker run --rm -it --user "$(id -u):$(id -g)" -v "$PWD:/work" ghcr.io/everlasting18/sb2pb
 ```
 
-Or download a binary from the [releases](https://github.com/pocketbasecloud/sb2pb/releases) page
+Or download a binary from the [releases](https://github.com/everlasting18/sb2pb/releases) page
 (macOS, Linux, Windows; amd64 and arm64). Releases are signed with Sigstore (see the release notes).
 
 ## What you need

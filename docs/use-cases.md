@@ -267,7 +267,7 @@ sb2pb migrate --yes
 
 docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" \
   -e SUPABASE_DB_URL -e SUPABASE_SECRET_KEY -e PB_URL -e PB_SUPERUSER_EMAIL -e PB_SUPERUSER_PASSWORD \
-  ghcr.io/pocketbasecloud/sb2pb migrate --yes
+  ghcr.io/everlasting18/sb2pb migrate --yes
 ```
 
 Without `--user`, the image cannot write into the mounted folder; sb2pb stops before it touches
