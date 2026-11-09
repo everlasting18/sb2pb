@@ -1,0 +1,4 @@
+# Reviewers requested automatically for each path (replace with your team).
+*                       @pocketbasecloud/sb2pb-maintainers
+/internal/app/rules.go  @pocketbasecloud/sb2pb-maintainers
+/.github/               @pocketbasecloud/sb2pb-maintainers

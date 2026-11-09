@@ -1,0 +1,56 @@
+name: Bug report
+description: sb2pb did something wrong or crashed
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. **Never paste connection strings, keys or passwords.**
+        `sb2pb-report.json` contains no credentials and is the most useful thing to attach.
+  - type: input
+    id: version
+    attributes:
+      label: sb2pb version
+      description: Output of `sb2pb version`
+      placeholder: sb2pb v0.1.0 (PocketBase v0.41.1)
+    validations:
+      required: true
+  - type: dropdown
+    id: command
+    attributes:
+      label: Command
+      options: [sb2pb (wizard), sb2pb migrate --yes, sb2pb analyze, sb2pb rollback]
+    validations:
+      required: true
+  - type: dropdown
+    id: source
+    attributes:
+      label: Supabase
+      options: [Hosted (supabase.com), Self-hosted]
+    validations:
+      required: true
+  - type: input
+    id: target
+    attributes:
+      label: PocketBase server
+      placeholder: v0.41.1, self-hosted / Pocketbasecloud / Docker
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: Terminal output
+      description: Copy the output (secrets are already masked by sb2pb).
+      render: text
+  - type: textarea
+    id: schema
+    attributes:
+      label: Smallest schema that shows the problem
+      description: A table definition or RLS policy, if the problem is about one.
+      render: sql

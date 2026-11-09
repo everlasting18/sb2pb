@@ -1,0 +1,98 @@
+# Release: push a tag (git tag v0.1.0 && git push origin v0.1.0); .github/workflows/release.yml runs this.
+version: 2
+project_name: sb2pb
+
+before:
+  hooks:
+    - go mod tidy
+    - go test ./...
+
+builds:
+  - id: sb2pb
+    main: ./cmd/sb2pb
+    binary: sb2pb
+    env:
+      - CGO_ENABLED=0
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+archives:
+  - id: default
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - LICENSE
+      - README.md
+
+checksum:
+  name_template: checksums.txt
+
+# SBOM per archive (needs syft on the runner)
+sboms:
+  - artifacts: archive
+
+# Keyless signature of the checksum file (Sigstore); verify with cosign verify-blob
+signs:
+  - cmd: cosign
+    artifacts: checksum
+    signature: "${artifact}.sigstore.json"
+    args:
+      - sign-blob
+      - --bundle=${signature}
+      - ${artifact}
+      - --yes
+
+dockers_v2:
+  - id: sb2pb
+    images:
+      - ghcr.io/pocketbasecloud/sb2pb
+    tags:
+      - "{{ .Version }}"
+      - latest
+    platforms:
+      - linux/amd64
+      - linux/arm64
+    dockerfile: Dockerfile
+    labels:
+      org.opencontainers.image.source: https://github.com/pocketbasecloud/sb2pb
+      org.opencontainers.image.licenses: MIT
+
+homebrew_casks:
+  - name: sb2pb
+    repository:
+      owner: pocketbasecloud
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    homepage: https://github.com/pocketbasecloud/sb2pb
+    description: Migrate a Supabase project to PocketBase
+    license: MIT
+
+scoops:
+  - name: sb2pb
+    repository:
+      owner: pocketbasecloud
+      name: scoop-bucket
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    homepage: https://github.com/pocketbasecloud/sb2pb
+    description: Migrate a Supabase project to PocketBase
+    license: MIT
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^ci:"
+
+release:
+  footer: |
+    Verify a download: `cosign verify-blob --bundle checksums.txt.sigstore.json --certificate-identity-regexp 'https://github.com/pocketbasecloud/sb2pb/' --certificate-oidc-issuer https://token.actions.githubusercontent.com checksums.txt`, then `sha256sum -c checksums.txt --ignore-missing`.

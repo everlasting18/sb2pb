@@ -1,0 +1,5 @@
+requests
+psycopg[binary]
+pyotp
+pillow
+argon2-cffi

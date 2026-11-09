@@ -1,0 +1,41 @@
+version: "2"
+run:
+  timeout: 5m
+linters:
+  default: standard # errcheck, govet, ineffassign, staticcheck, unused
+  enable:
+    - bodyclose
+    - errorlint
+    - gosec
+    - misspell
+    - unconvert
+  settings:
+    errcheck:
+      # Closing read-only resources and removing temp files are best effort.
+      exclude-functions:
+        - (io.Closer).Close
+        - (*os.File).Close
+        - (*archive/zip.ReadCloser).Close
+        - (*github.com/jackc/pgx/v5.Conn).Close
+        - (*ganigeorgiev.com/pocketbase/dbx.DB).Close
+        - (*ganigeorgiev.com/pocketbase/pocketbase/tools/filesystem.System).Close
+        - os.Remove
+        - os.RemoveAll
+        - fmt.Fprintf
+        - fmt.Fprintln
+    gosec:
+      excludes:
+        - G104 # same as errcheck
+        - G301 # output folders are meant to be readable by the user's tools (0755)
+        - G304 # reading files the user names on the command line is the point of the tool
+        - G306 # report and hook files are meant to be readable (0644)
+        - G704 # the tool connects to the URLs the user gives it
+    staticcheck:
+      checks: ["all", "-ST1000", "-ST1003", "-ST1005"] # error texts start with product names (Storage, Supabase)
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters: [gosec, errcheck]
+formatters:
+  enable:
+    - gofmt

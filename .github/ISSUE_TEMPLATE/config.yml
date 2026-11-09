@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Question or help with a migration
+    url: https://github.com/pocketbasecloud/sb2pb/discussions
+    about: Ask in Discussions; issues are for bugs and feature requests.
+  - name: Security problem
+    url: https://github.com/pocketbasecloud/sb2pb/security/advisories/new
+    about: Report privately, not in a public issue.

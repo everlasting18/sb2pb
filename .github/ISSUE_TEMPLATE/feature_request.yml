@@ -1,0 +1,20 @@
+name: Feature request
+description: Something sb2pb should migrate or do
+labels: [enhancement]
+body:
+  - type: textarea
+    id: case
+    attributes:
+      label: What are you moving?
+      description: The Supabase feature, policy or column type, and how your app uses it.
+    validations:
+      required: true
+  - type: textarea
+    id: today
+    attributes:
+      label: What happens today?
+      description: What sb2pb reports or produces now (for example "rule locked", "listed as manual work").
+  - type: textarea
+    id: wanted
+    attributes:
+      label: What should happen in PocketBase?
