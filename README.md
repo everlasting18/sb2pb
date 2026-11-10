@@ -162,12 +162,13 @@ the restored data so the server starts again, and lists them.
 |---|---|
 | Tables, primary/foreign keys, unique constraints, indexes | Collections, relation fields, unique indexes |
 | UUID primary keys | Kept as record ids, so links and URLs keep working |
-| `auth.users` + a `profiles` table keyed by user id | The `users` auth collection (profile columns merged in) |
+| `auth.users` + a `profiles` table keyed by user id | The `users` auth collection (profile columns merged in; a column named like a sign-in field, such as `email` or `phone`, becomes `profile_email`, `profile_phone`) |
+| Other tables keyed by user id (`user_settings`, `customers`…) | Collections of their own, with the user id as record id |
 | bcrypt password hashes | Kept: users sign in with their current password |
 | argon2 / Firebase scrypt hashes | Imported, flagged `password_reset_required` |
 | OAuth identities (Google, GitHub, Apple, Keycloak…) | `_externalAuths`, so users land on the same account |
-| Storage buckets and objects | File fields (public buckets) and protected files (private buckets) |
-| RLS policies (`auth.uid()`, `TO authenticated`, `EXISTS` joins, membership tables such as `org_id IN (select org_id from memberships where user_id = auth.uid())`, `WITH CHECK`) | API rules; anything not translatable is locked to superusers and listed |
+| Storage buckets and objects | File fields (public buckets) and protected files (private buckets); a download that fails or stops early is retried, then listed as an error, never stored as a partial file |
+| RLS policies (`auth.uid()`, `TO authenticated`, `EXISTS` joins, membership tables such as `org_id IN (select org_id from memberships where user_id = auth.uid())`, `WITH CHECK`) | API rules; anything not translatable is locked to superusers and listed, and so is a table only other roles could reach (a policy `TO service_role`, an internal or custom role, or no privileges for `anon`/`authenticated`) |
 | Column `DEFAULT`s | A generated `onRecordCreate` hook |
 | `DEFAULT auth.uid()` columns (`created_by`, `author_id`…) | A generated hook fills in the signed-in user, so apps that leave the column out keep working; insert rules accept the empty value |
 | "Updated at" triggers (`moddatetime(updated_at)` or a one-line `NEW.updated_at = now()` function) | Autodate fields that PocketBase sets on every update |

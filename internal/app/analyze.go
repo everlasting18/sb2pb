@@ -78,6 +78,18 @@ type Table struct {
 	Sampled   bool    `json:"sampled,omitempty"`
 	SamplePct float64 `json:"samplePct,omitempty"`
 	Writes    int64   `json:"writes,omitempty"`
+	// Privs holds the table privileges of the roles app requests run as: Privs["anon"]["SELECT"].
+	// nil when those roles do not exist (not a Supabase database); everything then counts as granted.
+	Privs map[string]map[string]bool `json:"-"`
+}
+
+// can reports whether an app role ("anon" or "authenticated") holds the table privilege for a command.
+// Without the privilege Postgres refuses the request before any policy is looked at.
+func (t *Table) can(role, cmd string) bool {
+	if t == nil || t.Privs == nil {
+		return true
+	}
+	return t.Privs[role][cmd]
 }
 
 func (t *Table) Col(name string) *Column {
@@ -355,6 +367,42 @@ func analyze(ctx context.Context, db *pgx.Conn, opts AnalyzeOptions) (*Analysis,
 			}
 		}
 		a.Tables = append(a.Tables, t)
+	}
+
+	// Table privileges of the two roles app requests run as. RLS policies only matter to a role that holds the
+	// privilege, so a rule is never opened for a role that had none.
+	byOID := map[uint32]*Table{}
+	for _, t := range all {
+		byOID[t.OID] = t
+	}
+	grows, err := db.Query(ctx, `select c.oid, r.rolname::text, p.priv, has_table_privilege(r.oid, c.oid, p.priv)
+		from pg_class c join pg_namespace n on n.oid = c.relnamespace
+		cross join pg_roles r cross join unnest(array['SELECT', 'INSERT', 'UPDATE', 'DELETE']) as p(priv)
+		where n.nspname = 'public' and c.relkind in ('r','p','v','m') and r.rolname in ('anon', 'authenticated')`)
+	if err != nil {
+		return nil, fmt.Errorf("reading table privileges: %w", err)
+	}
+	for grows.Next() {
+		var oid uint32
+		var role, priv string
+		var has bool
+		if err := grows.Scan(&oid, &role, &priv, &has); err != nil {
+			grows.Close()
+			return nil, fmt.Errorf("reading table privileges: %w", err)
+		}
+		if t := byOID[oid]; t != nil {
+			if t.Privs == nil {
+				t.Privs = map[string]map[string]bool{}
+			}
+			if t.Privs[role] == nil {
+				t.Privs[role] = map[string]bool{}
+			}
+			t.Privs[role][priv] = has
+		}
+	}
+	grows.Close()
+	if err := grows.Err(); err != nil {
+		return nil, fmt.Errorf("reading table privileges: %w", err)
 	}
 
 	prow, err := db.Query(ctx, `select schemaname::text, tablename::text, policyname::text, permissive, roles::text[], cmd, coalesce(qual, ''), coalesce(with_check, '')

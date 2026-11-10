@@ -378,6 +378,29 @@ type RuleResult struct {
 	Note    string   `json:"note,omitempty"`
 }
 
+// policyAudience reports which app requests a policy applies to. Requests from an app run as one of two Postgres
+// roles: "anon" without a session and "authenticated" with one ("public" covers both). A policy for any other role
+// (service_role, supabase_auth_admin, postgres, a custom role) never gave app users access, so it must not become
+// a PocketBase rule: those roles are returned in other.
+func policyAudience(roles []string) (anon, authed bool, other []string) {
+	if len(roles) == 0 { // pg_policies always names at least "public"
+		return true, true, nil
+	}
+	for _, r := range roles {
+		switch r {
+		case "public":
+			anon, authed = true, true
+		case "anon":
+			anon = true
+		case "authenticated":
+			authed = true
+		default:
+			other = append(other, r)
+		}
+	}
+	return anon, authed, other
+}
+
 // buildRules combines the permissive policies of one table into PocketBase rules.
 func buildRules(rc *ruleCtx, rls bool, pols []Policy) map[string]*RuleResult {
 	out := map[string]*RuleResult{}
@@ -389,7 +412,13 @@ func buildRules(rc *ruleCtx, rls bool, pols []Policy) map[string]*RuleResult {
 			res.Err = "RLS disabled on source table"
 			continue
 		}
-		var parts []string
+		// a policy only matters to a role that also holds the table privilege (GRANT)
+		grantAnon, grantAuthed := rc.table.can("anon", cmd), rc.table.can("authenticated", cmd)
+		if !grantAnon && !grantAuthed {
+			res.Err = "anon and authenticated have no " + cmd + " privilege on the table (no GRANT)"
+			continue
+		}
+		var parts, skipped []string
 		failed := false
 		for _, p := range pols {
 			if p.Cmd != cmd && p.Cmd != "ALL" {
@@ -398,6 +427,12 @@ func buildRules(rc *ruleCtx, rls bool, pols []Policy) map[string]*RuleResult {
 			if p.Permissive != "PERMISSIVE" {
 				failed, res.Err = true, "restrictive policies not supported yet"
 				break
+			}
+			forAnon, forAuthed, _ := policyAudience(p.Roles)
+			forAnon, forAuthed = forAnon && grantAnon, forAuthed && grantAuthed
+			if !forAnon && !forAuthed { // e.g. TO service_role: app users never passed through this policy
+				skipped = append(skipped, fmt.Sprintf("%q (%s)", p.Name, strings.Join(p.Roles, ", ")))
+				continue
 			}
 			res.Sources = append(res.Sources, p.Name)
 			rc.newRow = false
@@ -427,9 +462,9 @@ func buildRules(rc *ruleCtx, rls bool, pols []Policy) map[string]*RuleResult {
 				break
 			}
 			roleGuard := ""
-			if len(p.Roles) == 1 && p.Roles[0] == "authenticated" {
+			if !forAnon {
 				roleGuard = `@request.auth.id != ""`
-			} else if len(p.Roles) == 1 && p.Roles[0] == "anon" {
+			} else if !forAuthed {
 				roleGuard = `@request.auth.id = ""`
 			}
 			switch {
@@ -445,9 +480,15 @@ func buildRules(rc *ruleCtx, rls bool, pols []Policy) map[string]*RuleResult {
 				parts = append(parts, expr)
 			}
 		}
+		if len(skipped) > 0 {
+			res.Note = "not used, they apply to roles or privileges app users do not have: " + strings.Join(skipped, ", ")
+		}
 		if failed || len(parts) == 0 {
 			if !failed && res.Err == "" {
 				res.Err = "no policy for this command (Postgres denies by default)"
+				if len(skipped) > 0 {
+					res.Err = "no policy for app users (anon, authenticated) on this command; only for other roles: " + strings.Join(skipped, ", ")
+				}
 			}
 			continue
 		}

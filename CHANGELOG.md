@@ -19,7 +19,14 @@ First public release. Embeds PocketBase v0.41.1.
 - `sb2pb rollback`: restores the pre-migration backup, also when automigrate wrote new
   `pb_migrations` files after the move.
 - RLS translation, including membership tables (`EXISTS` / `IN` through a `memberships` table) and
-  `WITH CHECK`; anything untranslatable is locked to superusers and listed.
+  `WITH CHECK`; anything untranslatable is locked to superusers and listed. A rule only opens for the
+  roles app requests run as (`anon`, `authenticated`) and only where they hold the table privilege:
+  policies for `service_role`, internal or custom roles open nothing.
+- One table keyed by the user id (`profiles`) is merged into `users`; other such tables stay
+  collections with the user id as record id. Profile columns named like a sign-in field (`email`,
+  `phone`, `verified`…) are kept as `profile_<name>` instead of replacing the value from `auth.users`.
+- Storage downloads are verified and retried; a file that cannot be copied completely is listed as an
+  error and never stored as a partial file.
 - Generated hooks: column `DEFAULT`s, `DEFAULT auth.uid()` columns filled with the signed-in user,
   session exchange for users signed in on Supabase, and route stubs for Postgres functions that say
   whether the function was `SECURITY INVOKER` or `SECURITY DEFINER`.

@@ -541,7 +541,14 @@ func nextSteps(ui *UI, res *migrationResult, src *Source, tg *Target, reportPath
 	m := res.Migration
 	ui.Section(ui.green("Done") + fmt.Sprintf(" in %s · report: %s", m.Timings["total"], reportPath))
 	if errs, _ := m.Files["errors"].([]string); len(errs) > 0 {
-		ui.Warn("%d file(s) could not be copied (listed in the report)", len(errs))
+		ui.Warn("%s could not be copied: the records exist, the file content is missing (all listed in the report)", pl(int64(len(errs)), "file", "files"))
+		for i, e := range errs {
+			if i == 5 {
+				ui.Info("  … and %d more", len(errs)-5)
+				break
+			}
+			ui.Info("  %s", e)
+		}
 	}
 	if d, _ := m.Files["danglingRelations"].(map[string]int); len(d) > 0 {
 		ui.Warn("%d relation field(s) point to missing records (listed in the report)", len(d))
