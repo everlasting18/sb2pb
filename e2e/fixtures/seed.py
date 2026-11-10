@@ -80,8 +80,10 @@ up("avatars", "brand/logo.png", png("PB", "#333333"), "image/png", SERVICE)   # 
 
 with psycopg.connect(PG, autocommit=True) as c:
     a_id, b_id = out["alice"]["id"], out["bob"]["id"]
-    c.execute("update public.profiles set username=%s, website=%s, birthday=%s, avatar_url=%s, updated_at=now() where id=%s",
-              ("alice", "https://alice.dev", "1995-04-12", f"{a_id}/avatar.png", a_id))
+    c.execute("update public.profiles set username=%s, website=%s, birthday=%s, avatar_url=%s, phone=%s, updated_at=now() where id=%s",
+              ("alice", "https://alice.dev", "1995-04-12", f"{a_id}/avatar.png", "0900 000 001", a_id))
+    c.execute("insert into public.user_settings (user_id, theme, locale) values (%s, 'dark', 'vi'), (%s, 'light', null)", (a_id, b_id))
+    c.execute("insert into public.user_roles (user_id, role) values (%s, 'admin')", (a_id,))
     c.execute("update public.profiles set username=%s, avatar_url=%s where id=%s",
               ("bob", f"http://localhost:8000/storage/v1/object/public/avatars/{b_id}/avatar.png", b_id))
     for k in ("carol", "dave", "erin", "oauth"):

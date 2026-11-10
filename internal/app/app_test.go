@@ -1,11 +1,15 @@
 package app
 
 import (
+	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"ganigeorgiev.com/pocketbase/pocketbase/core"
 )
@@ -19,6 +23,10 @@ func TestParseSource(t *testing.T) {
 		{"postgresql://postgres:pw@localhost:54322/postgres", "", "", ""},
 		{"postgresql://postgres.abcd:[YOUR-PASSWORD]@aws-0-eu.pooler.supabase.com:5432/postgres", "", "", "[YOUR-PASSWORD]"},
 		{"https://abcdefghijklmnopqrst.supabase.co", "", "", "not a Postgres connection string"},
+		// transaction pooler: refused with a pointer to the session pooler; port 6543 elsewhere is not judged
+		{"postgresql://postgres.abcdefghijklmnopqrst:pw@aws-0-eu-central-1.pooler.supabase.com:6543/postgres", "", "", "Session pooler"},
+		{"postgresql://postgres:pw@db.abcdefghijklmnopqrst.supabase.co:6543/postgres", "", "", "Session pooler"},
+		{"postgresql://postgres:pw@db.internal.example:6543/postgres", "", "", ""},
 		{"", "", "", "empty"},
 	}
 	for _, c := range cases {
@@ -318,5 +326,317 @@ func TestBucketReadPolicies(t *testing.T) {
 	}
 	if got := bucketReadPolicies(a, "avatars"); len(got) != 0 {
 		t.Errorf("avatars (whole bucket readable) should not warn: %v", got)
+	}
+}
+
+// A policy only opens a rule for the app roles it names and that hold the table privilege. Policies for
+// service_role, internal roles or custom roles never gave app users access and must leave the rule locked.
+func TestRulesFollowPolicyRolesAndGrants(t *testing.T) {
+	newRC := func(privs map[string]map[string]bool) *ruleCtx {
+		return &ruleCtx{table: &Table{Name: "t", Privs: privs},
+			fieldOf: func(c string) (string, bool) { return c, true }, relTo: func(string) string { return "" }}
+	}
+	all := map[string]bool{"SELECT": true, "INSERT": true, "UPDATE": true, "DELETE": true}
+	pol := func(cmd string, qual string, roles ...string) Policy {
+		return Policy{Name: cmd + " " + strings.Join(roles, "+"), Cmd: cmd, Permissive: "PERMISSIVE", Roles: roles, Qual: qual, Check: qual}
+	}
+	cases := []struct {
+		name   string
+		privs  map[string]map[string]bool
+		pols   []Policy
+		cmd    string
+		status string
+		rule   string
+	}{
+		{"service_role only stays locked", nil, []Policy{pol("ALL", "true", "service_role")}, "SELECT", "locked", ""},
+		{"service_role only stays locked for writes", nil, []Policy{pol("ALL", "true", "service_role")}, "DELETE", "locked", ""},
+		{"internal role stays locked", nil, []Policy{pol("SELECT", "true", "supabase_auth_admin")}, "SELECT", "locked", ""},
+		{"custom role stays locked", nil, []Policy{pol("SELECT", "true", "reporting")}, "SELECT", "locked", ""},
+		{"public is everyone", nil, []Policy{pol("SELECT", "true", "public")}, "SELECT", "translated", ""},
+		{"anon and authenticated is everyone", nil, []Policy{pol("SELECT", "true", "anon", "authenticated")}, "SELECT", "translated", ""},
+		{"authenticated with service_role is signed-in users only", nil, []Policy{pol("SELECT", "true", "authenticated", "service_role")}, "SELECT", "translated", `@request.auth.id != ""`},
+		{"anon only", nil, []Policy{pol("SELECT", "true", "anon")}, "SELECT", "translated", `@request.auth.id = ""`},
+		{"service_role policy does not widen a user policy", nil,
+			[]Policy{pol("SELECT", "true", "service_role"), pol("SELECT", "(user_id = auth.uid())", "authenticated")},
+			"SELECT", "translated", `@request.auth.id != "" && (@request.auth.id = user_id)`},
+		{"no privilege for either role", map[string]map[string]bool{"anon": {}, "authenticated": {}}, []Policy{pol("SELECT", "true", "public")}, "SELECT", "locked", ""},
+		{"privilege only for authenticated", map[string]map[string]bool{"anon": {}, "authenticated": all}, []Policy{pol("SELECT", "true", "public")}, "SELECT", "translated", `@request.auth.id != ""`},
+		{"privilege only for anon, policy only for authenticated", map[string]map[string]bool{"anon": all, "authenticated": {}}, []Policy{pol("SELECT", "true", "authenticated")}, "SELECT", "locked", ""},
+		{"read privilege does not open writes", map[string]map[string]bool{"anon": {"SELECT": true}, "authenticated": {"SELECT": true}}, []Policy{pol("ALL", "true", "public")}, "INSERT", "locked", ""},
+	}
+	for _, c := range cases {
+		r := buildRules(newRC(c.privs), true, c.pols)[c.cmd]
+		if r.Status != c.status || r.Rule != c.rule {
+			t.Errorf("%s: got %s %q (%s), want %s %q", c.name, r.Status, r.Rule, r.Err, c.status, c.rule)
+		}
+		if r.Status == "locked" && r.Err == "" {
+			t.Errorf("%s: a locked rule must say why", c.name)
+		}
+	}
+	// the report names the policies that were left out
+	r := buildRules(newRC(nil), true, []Policy{pol("SELECT", "true", "service_role")})["SELECT"]
+	if !strings.Contains(r.Err, "service_role") || len(r.Sources) != 0 {
+		t.Errorf("skipped policy should be explained and not listed as a source: %+v", r)
+	}
+}
+
+func userKeyed(name, pk string, cols ...string) *Table {
+	t := &Table{Name: name, PK: []string{pk}, FKs: []FK{{Cols: []string{pk}, RefTable: "auth.users", RefCols: []string{"id"}}},
+		Columns: []*Column{{Name: pk, TypName: "uuid", Type: "uuid"}}}
+	for _, c := range cols {
+		typ := "text"
+		if c == "verified" {
+			typ = "bool"
+		}
+		t.Columns = append(t.Columns, &Column{Name: c, TypName: typ, Type: typ})
+	}
+	return t
+}
+
+// Only one table keyed by the user id is merged into users; the others stay collections, so no table is dropped.
+func TestOneProfileTableIsMerged(t *testing.T) {
+	plan := func(tables ...*Table) *Builder {
+		b := &Builder{a: &Analysis{Tables: tables}}
+		b.plan()
+		return b
+	}
+	merged := func(b *Builder) string {
+		if b.users == nil {
+			return ""
+		}
+		return b.users.PGName
+	}
+	posts := &Table{Name: "posts", PK: []string{"id"}, Columns: []*Column{{Name: "id", TypName: "uuid", Type: "uuid"}}}
+
+	if got := merged(plan(userKeyed("user_settings", "user_id", "theme"), posts)); got != "user_settings" {
+		t.Errorf("a single per-user table is merged whatever its name, got %q", got)
+	}
+	b := plan(userKeyed("user_prefs", "id", "theme"), userKeyed("profiles", "id", "username"), posts)
+	if got := merged(b); got != "profiles" {
+		t.Errorf("profiles should be the merged table, got %q", got)
+	}
+	prefs := b.byPG["user_prefs"]
+	if prefs.Users || prefs.Name != "user_prefs" || prefs.IdMode != "uuid" || prefs.field("id").Kind != "id" {
+		t.Errorf("user_prefs must stay its own collection keyed by the user id: %+v", prefs)
+	}
+	if prefs.field("theme") == nil || b.byPG["profiles"].field("username") == nil {
+		t.Error("columns of both tables must be planned")
+	}
+	if got := merged(plan(userKeyed("user_settings", "user_id", "theme"), userKeyed("user_stats", "user_id", "logins"))); got != "" {
+		t.Errorf("no profile-like name among several candidates: none is merged, got %q", got)
+	}
+	if got := merged(plan(posts)); got != "" {
+		t.Errorf("no per-user table, got %q", got)
+	}
+}
+
+// Profile columns must not overwrite what users gets from auth.users (email, verified, password, phone...).
+func TestMergedProfileColumnsKeepAuthFields(t *testing.T) {
+	b := &Builder{a: &Analysis{Tables: []*Table{userKeyed("profiles", "user_id", "email", "verified", "password", "phone", "name", "full_name", "avatar", "username", "profile_phone")}}}
+	b.plan()
+	want := map[string]string{"email": "profile_email", "verified": "profile_verified", "password": "profile_password", "phone": "profile_phone_",
+		"name": "name", "full_name": "full_name", "avatar": "profile_avatar", "username": "username", "profile_phone": "profile_phone"}
+	seen := map[string]string{}
+	for pg, pb := range want {
+		fp := b.users.field(pg)
+		if fp == nil || fp.Name != pb {
+			t.Errorf("profiles.%s -> %+v, want field %q", pg, fp, pb)
+			continue
+		}
+		if other, dup := seen[strings.ToLower(fp.Name)]; dup {
+			t.Errorf("profiles.%s and profiles.%s both map to %q", pg, other, fp.Name)
+		}
+		seen[strings.ToLower(fp.Name)] = pg
+	}
+	// without a name column, full_name takes the built-in users.name field; reserved names match in any case
+	b = &Builder{a: &Analysis{Tables: []*Table{userKeyed("profiles", "id", "full_name", "Email", "tokenKey")}}}
+	b.plan()
+	for pg, pb := range map[string]string{"full_name": "name", "Email": "profile_Email", "tokenKey": "profile_tokenKey"} {
+		if got := b.users.field(pg).Name; got != pb {
+			t.Errorf("%s -> %q, want %q", pg, got, pb)
+		}
+	}
+}
+
+// A download that is cut off, shorter than announced or failing must be an error, never a (partial) file.
+func TestFetchObjectRejectsPartialDownloads(t *testing.T) {
+	old := fetchBackoff
+	fetchBackoff = time.Millisecond
+	defer func() { fetchBackoff = old }()
+	body := strings.Repeat("x", 4096)
+	var hits atomic.Int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ok", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(body)) })
+	cut := func(w http.ResponseWriter) {
+		w.Header().Set("Content-Length", "4096")
+		_, _ = w.Write([]byte(body[:1000]))
+		if conn, _, err := w.(http.Hijacker).Hijack(); err == nil {
+			conn.Close() // connection drops mid-file
+		}
+	}
+	mux.HandleFunc("/cut", func(w http.ResponseWriter, _ *http.Request) { hits.Add(1); cut(w) })
+	mux.HandleFunc("/flaky", func(w http.ResponseWriter, _ *http.Request) {
+		if hits.Add(1) < 3 {
+			cut(w)
+			return
+		}
+		_, _ = w.Write([]byte(body))
+	})
+	mux.HandleFunc("/busy", func(w http.ResponseWriter, _ *http.Request) {
+		if hits.Add(1) < 2 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		_, _ = w.Write([]byte(body))
+	})
+	mux.HandleFunc("/missing", func(w http.ResponseWriter, _ *http.Request) { hits.Add(1); w.WriteHeader(http.StatusNotFound) })
+	mux.HandleFunc("/stall", func(w http.ResponseWriter, r *http.Request) { // sends a part, then nothing more
+		hits.Add(1)
+		w.Header().Set("Content-Length", "4096")
+		_, _ = w.Write([]byte(body[:1000]))
+		w.(http.Flusher).Flush()
+		<-r.Context().Done()
+	})
+	mux.HandleFunc("/slow", func(w http.ResponseWriter, _ *http.Request) { // 8 chunks, 40 ms apart: 320 ms in total
+		hits.Add(1)
+		for i := 0; i < 8; i++ {
+			_, _ = w.Write([]byte(body[i*512 : (i+1)*512]))
+			w.(http.Flusher).Flush()
+			time.Sleep(40 * time.Millisecond)
+		}
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	client := &http.Client{Timeout: 5 * time.Second}
+
+	if data, err := fetchObject(client, srv.URL+"/ok", ""); err != nil || string(data) != body {
+		t.Fatalf("complete download: %d bytes, %v", len(data), err)
+	}
+	hits.Store(0)
+	if data, err := fetchObject(client, srv.URL+"/cut", ""); err == nil || data != nil {
+		t.Errorf("cut download returned %d bytes and no error", len(data))
+	} else if hits.Load() != 3 {
+		t.Errorf("cut download tried %d times, want 3", hits.Load())
+	}
+	hits.Store(0)
+	if data, err := fetchObject(client, srv.URL+"/flaky", ""); err != nil || string(data) != body {
+		t.Errorf("a download that succeeds on the third try: %d bytes, %v", len(data), err)
+	}
+	hits.Store(0)
+	if data, err := fetchObject(client, srv.URL+"/busy", ""); err != nil || string(data) != body {
+		t.Errorf("HTTP 503 then 200: %d bytes, %v", len(data), err)
+	}
+	hits.Store(0)
+	if _, err := fetchObject(client, srv.URL+"/missing", ""); err == nil || !strings.Contains(err.Error(), "404") || hits.Load() != 1 {
+		t.Errorf("HTTP 404 is final: %v after %d tries", err, hits.Load())
+	}
+	// no bytes for stallTimeout: given up and retried, whatever the size of the file or the client's own limit
+	oldStall := stallTimeout
+	stallTimeout = 100 * time.Millisecond
+	hits.Store(0)
+	if data, err := fetchObject(&http.Client{}, srv.URL+"/stall", ""); err == nil || data != nil || !strings.Contains(err.Error(), "stalled") || hits.Load() != 3 {
+		t.Errorf("a stalled download must be given up and retried: %d bytes, %v, %d tries", len(data), err, hits.Load())
+	}
+	// a slow download that keeps sending is not a stall
+	hits.Store(0)
+	if data, err := fetchObject(&http.Client{}, srv.URL+"/slow", ""); err != nil || string(data) != body || hits.Load() != 1 {
+		t.Errorf("a slow but steady download must succeed: %d bytes, %v, %d tries", len(data), err, hits.Load())
+	}
+	stallTimeout = oldStall
+	// the client's own timeout is final: trying again would only wait as long
+	hits.Store(0)
+	impatient := &http.Client{Timeout: 200 * time.Millisecond}
+	if data, err := fetchObject(impatient, srv.URL+"/stall", ""); err == nil || data != nil || hits.Load() != 1 {
+		t.Errorf("a client timeout must fail without a retry: %d bytes, %v, %d tries", len(data), err, hits.Load())
+	}
+}
+
+// Schemas PocketBase cannot hold are reported by the analysis and stop migrate before the target is touched.
+func TestSchemaStoppers(t *testing.T) {
+	col := func(names ...string) []*Column {
+		out := []*Column{{Name: "id", TypName: "uuid", Type: "uuid"}}
+		for _, n := range names {
+			out = append(out, &Column{Name: n, TypName: "text", Type: "text"})
+		}
+		return out
+	}
+	tbl := func(name string, cols ...string) *Table {
+		return &Table{Name: name, PK: []string{"id"}, Columns: col(cols...)}
+	}
+	titles := func(tables ...*Table) string {
+		r := buildReadiness(&Analysis{Tables: tables})
+		var out []string
+		for _, it := range r.Stoppers() {
+			if it.Severity != "blocker" || it.Handling == "" {
+				t.Errorf("a stopper must be a blocker with a way out: %+v", it)
+			}
+			out = append(out, it.Title)
+		}
+		return strings.Join(out, " | ")
+	}
+	if got := titles(tbl("posts", "title"), tbl("CamelCase", "userId"), tbl("_internal", "v"), tbl("2fa_codes", "code")); got != "" {
+		t.Errorf("valid names must not stop a migration: %s", got)
+	}
+	for _, c := range []struct {
+		tables []*Table
+		want   []string
+	}{
+		{[]*Table{tbl("Order Items", "price")}, []string{"Table names", "`Order Items`"}},
+		{[]*Table{tbl("khách_hàng", "ten")}, []string{"Table names", "`khách_hàng`"}},
+		{[]*Table{tbl("my-table", "v")}, []string{"Table names", "`my-table`"}},
+		{[]*Table{tbl("orders", "Unit Price", "my-col", "tên")}, []string{"Column names", "`orders.Unit Price`", "`orders.my-col`", "`orders.tên`"}},
+		{[]*Table{tbl("orders", "Email", "email")}, []string{"Column names", "once case is ignored"}},
+		{[]*Table{tbl("users", "nickname")}, []string{"built-in PocketBase collection", "`users`"}},
+		{[]*Table{tbl("Posts", "a"), tbl("posts", "b")}, []string{"differ only in upper/lower case", "`Posts` / `posts`"}},
+	} {
+		got := titles(c.tables...)
+		for _, w := range c.want {
+			if !strings.Contains(got, w) {
+				t.Errorf("%s: stoppers %q should mention %q", c.tables[0].Name, got, w)
+			}
+		}
+	}
+	// a users table keyed by the auth user id is the profile table, not a clash
+	if got := titles(userKeyed("users", "id", "nickname")); got != "" {
+		t.Errorf("public.users keyed by auth.users is merged, not refused: %s", got)
+	}
+}
+
+// Columns named like a reserved PocketBase field are kept under another name, and rows of a table without a
+// primary key get distinct ids even when two rows are identical.
+func TestReservedColumnsAndRowsWithoutKey(t *testing.T) {
+	text := func(names ...string) []*Column {
+		var out []*Column
+		for _, n := range names {
+			out = append(out, &Column{Name: n, TypName: "text", Type: "text"})
+		}
+		return out
+	}
+	b := &Builder{a: &Analysis{Tables: []*Table{
+		{Name: "imported", Columns: text("id", "expand", "collectionId", "name", "id_col")}, // no primary key
+		{Name: "pairs", PK: []string{"id", "lang"}, Columns: text("id", "lang", "v")},       // id is only part of the key
+		{Name: "docs", PK: []string{"code"}, Columns: text("code", "ID", "title")},          // another column is the key
+	}}}
+	b.plan()
+	for ref, want := range map[string]string{"imported.id": "id_col_", "imported.expand": "expand_col", "imported.collectionId": "collectionId_col",
+		"imported.name": "name", "pairs.id": "id_col", "pairs.lang": "lang", "docs.ID": "ID_col", "docs.title": "title"} {
+		tbl, col, _ := strings.Cut(ref, ".")
+		if fp := b.byPG[tbl].field(col); fp == nil || fp.Name != want {
+			t.Errorf("%s -> %+v, want field %q", ref, fp, want)
+		}
+	}
+	if got := buildReadiness(b.a).Stoppers(); len(got) != 0 {
+		t.Errorf("renamed columns must not stop the migration: %+v", got)
+	}
+	noKey, pairs := b.byPG["imported"], b.byPG["pairs"]
+	row := map[string]json.RawMessage{"id": json.RawMessage(`"7"`), "expand": json.RawMessage(`"x"`), "lang": json.RawMessage(`"vi"`)}
+	if a, c := recordID(noKey, row, 1), recordID(noKey, row, 2); a == c || len(a) != 15 {
+		t.Errorf("identical rows without a key must get different ids: %q %q", a, c)
+	}
+	if a, c := recordID(noKey, row, 5), recordID(noKey, row, 5); a != c {
+		t.Errorf("the same row at the same position must keep its id: %q %q", a, c)
+	}
+	if a, c := recordID(pairs, row, 1), recordID(pairs, row, 2); a != c {
+		t.Errorf("with a primary key the id depends on the key only: %q %q", a, c)
 	}
 }

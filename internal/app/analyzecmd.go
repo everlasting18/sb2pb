@@ -91,19 +91,26 @@ func connectSource(ui *UI, flagVal, session string) (*Source, *pgx.Conn, error) 
 		src, err := ParseSource(dsn)
 		if err == nil {
 			ui.Info("%s", ui.dim(src.Redacted()))
+			if flagVal != "" && src.Config.Password != "" {
+				ui.Warn("--from puts the database password in your shell history and the process list; prefer SUPABASE_DB_URL or the hidden prompt")
+			}
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			var conn *pgx.Conn
 			conn, err = src.Connect(ctx, session)
 			cancel()
 			if err == nil {
 				var ro, ver string
-				_ = conn.QueryRow(context.Background(), "select current_setting('transaction_read_only'), split_part(current_setting('server_version'), ' ', 1)").Scan(&ro, &ver)
-				project := src.Ref
-				if project == "" {
-					project = src.Host
+				qerr := conn.QueryRow(context.Background(), "select current_setting('transaction_read_only'), split_part(current_setting('server_version'), ' ', 1)").Scan(&ro, &ver)
+				if qerr == nil {
+					project := src.Ref
+					if project == "" {
+						project = src.Host
+					}
+					ui.OK("Connected · project %s · Postgres %s · read-only session (transaction_read_only = %s)", project, ver, ro)
+					return src, conn, nil
 				}
-				ui.OK("Connected · project %s · Postgres %s · read-only session (transaction_read_only = %s)", project, ver, ro)
-				return src, conn, nil
+				conn.Close(context.Background()) // connected, but the first query failed (e.g. a transaction-mode pooler)
+				err = errors.New(friendly(qerr))
 			}
 		}
 		if !prompted || attempt >= 3 {

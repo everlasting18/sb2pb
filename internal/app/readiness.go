@@ -18,6 +18,8 @@ type RItem struct {
 	Handling string  `json:"handling"`
 	Effort   float64 `json:"effortHours,omitempty"`
 	Penalty  int     `json:"penalty,omitempty"`
+	// Stops marks a problem that makes the migration impossible (not just incomplete): migrate refuses to start.
+	Stops bool `json:"stopsMigration,omitempty"`
 }
 
 type RField struct {
@@ -183,6 +185,9 @@ func buildReadiness(a *Analysis) *Readiness {
 	st := &r.Stats
 	add := func(it RItem) { r.Items = append(r.Items, it) }
 	diff := func(it RItem) { r.Differences = append(r.Differences, it) }
+	for _, it := range schemaStoppers(b.plans) {
+		add(it)
+	}
 
 	// ---------- tables & mapping ----------
 	var nullCols, textNums, nonASCII, tsCols, nonFinite []string

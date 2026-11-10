@@ -1,0 +1,35 @@
+name: hosted smoke
+# Manual check against a real hosted Supabase project: Session pooler, sb_secret_ key, hosted Storage.
+# The e2e suite runs on a self-hosted stack and cannot cover those. Run it before a release:
+#   Actions -> hosted smoke -> Run workflow
+# Secrets (Settings -> Secrets and variables -> Actions), from a TEST project, because table names and row
+# counts are printed in this public log:
+#   SMOKE_SUPABASE_DB_URL       Session pooler connection string
+#   SMOKE_SUPABASE_SECRET_KEY   secret key (optional; without it Storage files are skipped)
+# Supabase is only read. The target is a throwaway PocketBase on the runner.
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: |
+            go.sum
+            e2e/pocketbase/go.sum
+      - name: Check the secret is there
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SMOKE_SUPABASE_DB_URL }}
+        run: test -n "$SUPABASE_DB_URL" || { echo "::error::Add the SMOKE_SUPABASE_DB_URL secret (Session pooler string of a test project)"; exit 1; }
+      - name: Analyze, migrate, compare, roll back
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SMOKE_SUPABASE_DB_URL }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SMOKE_SUPABASE_SECRET_KEY }}
+        run: e2e/hosted_smoke.sh

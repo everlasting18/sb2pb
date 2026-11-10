@@ -26,6 +26,24 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Check the tap token before anything is published
+        # GoReleaser writes the Homebrew cask and the Scoop manifest last, after the release and the image are
+        # public. A missing or read-only token must fail here instead. The check creates and deletes a branch.
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          test -n "$GH_TOKEN" || { echo "::error::The HOMEBREW_TAP_TOKEN secret is not set"; exit 1; }
+          for repo in everlasting18/homebrew-tap everlasting18/scoop-bucket; do
+            branch=$(gh api "repos/$repo" --jq .default_branch) ||
+              { echo "::error::$repo: not found, or HOMEBREW_TAP_TOKEN cannot read it"; exit 1; }
+            sha=$(gh api "repos/$repo/git/ref/heads/$branch" --jq .object.sha) ||
+              { echo "::error::$repo has no commit yet: add a README so there is a branch to write to"; exit 1; }
+            probe="refs/heads/sb2pb-token-check-$GITHUB_RUN_ID"
+            gh api -X POST "repos/$repo/git/refs" -f ref="$probe" -f sha="$sha" > /dev/null ||
+              { echo "::error::HOMEBREW_TAP_TOKEN cannot write to $repo (it needs Contents: read and write)"; exit 1; }
+            gh api -X DELETE "repos/$repo/git/$probe" > /dev/null
+            echo "$repo: write access confirmed"
+          done
       - uses: goreleaser/goreleaser-action@v7
         with:
           version: "~> v2"
@@ -33,3 +51,56 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}  # write access to homebrew-tap and scoop-bucket
+
+  verify:
+    # Installs what was just published, the way a user would, on the three systems.
+    needs: release
+    permissions:
+      contents: read
+      packages: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, asset: linux_amd64.tar.gz }
+          - { os: macos-latest, asset: darwin_arm64.tar.gz }
+          - { os: windows-latest, asset: windows_amd64.zip }
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ github.ref_name }}
+      ASSET: ${{ matrix.asset }}
+    steps:
+      - uses: sigstore/cosign-installer@v3
+      - name: Download the archive, check its signature and checksum
+        run: |
+          file="sb2pb_${TAG#v}_${ASSET}"
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" -p "$file" -p checksums.txt -p checksums.txt.sigstore.json
+          cosign verify-blob --bundle checksums.txt.sigstore.json \
+            --certificate-identity-regexp "https://github.com/$GITHUB_REPOSITORY/" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com checksums.txt
+          grep " $file\$" checksums.txt > this.txt
+          if command -v sha256sum > /dev/null; then sha256sum -c this.txt; else shasum -a 256 -c this.txt; fi
+      - name: Run the binary
+        run: |
+          file="sb2pb_${TAG#v}_${ASSET}"
+          case "$file" in *.zip) unzip -q "$file" ;; *) tar xzf "$file" ;; esac
+          ./sb2pb version | tee version.txt
+          grep -q "^sb2pb ${TAG#v} " version.txt
+          ./sb2pb analyze --help > /dev/null
+      - name: Run the Docker image
+        if: runner.os == 'Linux'
+        run: |
+          echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          docker run --rm "ghcr.io/$GITHUB_REPOSITORY:${TAG#v}" version | tee image.txt
+          grep -q "^sb2pb ${TAG#v} " image.txt
+      - name: Install with Homebrew
+        # the tap is not updated for a release candidate
+        if: runner.os == 'macOS' && !contains(github.ref_name, '-')
+        run: |
+          brew install everlasting18/tap/sb2pb
+          sb2pb version | tee brew.txt
+          grep -q "^sb2pb ${TAG#v} " brew.txt

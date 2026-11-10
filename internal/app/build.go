@@ -6,8 +6,10 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -18,6 +20,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"ganigeorgiev.com/pocketbase/pocketbase/core"
@@ -104,25 +107,81 @@ type Builder struct {
 	curRow     map[string]json.RawMessage
 }
 
-func pbNameForMergedUsers(col string, kind string) string {
-	switch {
-	case col == "full_name":
-		return "name"
-	case col == "avatar_url" && kind == "file":
-		return "avatar"
+// pbReservedFields are names a PocketBase field cannot have: the record id (a column called id that is not the
+// single primary key) and the names PocketBase reserves in records and filters. Such columns are kept under
+// <name>_col. Compared in lower case, because SQLite column names ignore case.
+var pbReservedFields = map[string]bool{"id": true, "expand": true, "collectionid": true, "collectionname": true,
+	"null": true, "true": true, "false": true, "_rowid_": true}
+
+// usersReserved are the fields of the users collection a merged profile column must never overwrite: PocketBase's
+// own auth fields and the ones importUsers fills from auth.users. Compared in lower case.
+var usersReserved = map[string]bool{"id": true, "email": true, "emailvisibility": true, "verified": true, "password": true,
+	"tokenkey": true, "created": true, "updated": true, "phone": true, "user_metadata": true, "app_metadata": true,
+	"banned_until": true, "last_sign_in_at": true, "password_reset_required": true}
+
+// profileTableNames are the names that mark the profile table when several tables are keyed by the user id.
+var profileTableNames = []string{"profiles", "profile", "users", "user_profiles"}
+
+// keyedByUser reports whether a table has one row per user: its primary key is a foreign key to auth.users.
+func keyedByUser(t *Table) bool {
+	if len(t.PK) != 1 {
+		return false
 	}
-	return col
+	fk := t.FKFor(t.PK[0])
+	return fk != nil && fk.RefTable == "auth.users"
+}
+
+// pickProfileTable chooses the one table that is merged into the users collection. Only one can be: a second
+// one would bring its own columns and rules. A single candidate is merged whatever its name; among several,
+// the one with a profile-like name; with no such name none is merged. Tables that are not merged stay
+// collections of their own, with the user id as record id, so nothing is dropped.
+func pickProfileTable(tables []*Table) *Table {
+	var cands []*Table
+	for _, t := range tables {
+		if keyedByUser(t) {
+			cands = append(cands, t)
+		}
+	}
+	if len(cands) == 1 {
+		return cands[0]
+	}
+	for _, name := range profileTableNames {
+		for _, t := range cands {
+			if t.Name == name {
+				return t
+			}
+		}
+	}
+	return nil
+}
+
+// mergedFieldName names a profile column inside the users collection. full_name and avatar_url take the built-in
+// name and avatar fields unless the table has columns with those names already; a column that would overwrite a
+// field filled from auth.users (email, verified, password, phone...) gets a profile_ prefix instead.
+func mergedFieldName(t *Table, col, kind string) (name, note string) {
+	switch {
+	case col == "full_name" && t.Col("name") == nil:
+		return "name", ""
+	case col == "avatar_url" && kind == "file" && t.Col("avatar") == nil:
+		return "avatar", ""
+	case usersReserved[strings.ToLower(col)] || (col == "avatar" && kind != "file"):
+		name = "profile_" + col
+		for t.Col(name) != nil {
+			name += "_"
+		}
+		return name, fmt.Sprintf("renamed: users.%s is filled from auth.users", col)
+	}
+	return col, ""
 }
 
 func (b *Builder) plan() {
 	b.byPG = map[string]*CollPlan{}
+	profile := pickProfileTable(b.a.Tables)
 	for _, t := range b.a.Tables {
 		cp := &CollPlan{Table: t, PGName: t.Name, Name: t.Name, Rows: t.Rows}
-		if len(t.PK) == 1 {
-			if fk := t.FKFor(t.PK[0]); fk != nil && fk.RefTable == "auth.users" {
-				cp.Users, cp.Name = true, "users"
-				b.users = cp
-			}
+		if t == profile {
+			cp.Users, cp.Name = true, "users"
+			b.users = cp
 		}
 		var pkc *Column
 		if len(t.PK) == 1 {
@@ -161,6 +220,8 @@ func (b *Builder) plan() {
 			if isPK && cp.IdMode != "hash" {
 				fp.Kind, fp.Name = "id", "id"
 				switch {
+				case !cp.Users && keyedByUser(t):
+					fp.Note = "references auth.users -> record id = the user's id (one record per user, kept as its own collection); deleting a user does not delete it"
 				case strings.Contains(c.Default, "gen_random_uuid") || strings.Contains(c.Default, "uuid_generate"):
 					fp.Note = "DEFAULT gen_random_uuid() -> id autogenerate pattern (UUIDv4 shape)"
 				case cp.IdMode == "int":
@@ -208,10 +269,22 @@ func (b *Builder) plan() {
 				fp.DefaultLit = true
 			}
 			if cp.Users {
-				fp.Name = pbNameForMergedUsers(c.Name, fp.Kind)
+				var renamed string
+				fp.Name, renamed = mergedFieldName(t, c.Name, fp.Kind)
+				if renamed != "" {
+					fp.Note = strings.TrimPrefix(fp.Note+"; "+renamed, "; ")
+				}
 				if c.Name == "created_at" {
 					fp.Kind, fp.Note = "skip", "duplicate of auth.users.created_at (users.created)"
 				}
+			}
+			if fp.Kind != "skip" && pbReservedFields[strings.ToLower(fp.Name)] {
+				reserved := fp.Name
+				fp.Name += "_col"
+				for t.Col(fp.Name) != nil {
+					fp.Name += "_"
+				}
+				fp.Note = strings.TrimPrefix(fp.Note+"; ", "; ") + fmt.Sprintf("renamed: %q is a reserved name in PocketBase", reserved)
 			}
 		}
 		for _, ck := range t.Checks {
@@ -229,10 +302,12 @@ func (b *Builder) plan() {
 			what := "composite PK (" + strings.Join(t.PK, ",") + ")"
 			if len(t.PK) == 1 {
 				what = "text PK with values PocketBase rejects as ids (/ . space, reserved names...)"
-			} else if len(t.PK) == 0 {
-				what = "no PK"
 			}
-			cp.Fields = append([]*FieldPlan{{Name: "id", Kind: "id", Note: what + " -> id = sha1(key)[:15]"}}, cp.Fields...)
+			note := what + " -> id = sha1(key)[:15]"
+			if len(t.PK) == 0 {
+				note = "no PK -> id = sha1(row and its position)[:15], so identical rows are all kept"
+			}
+			cp.Fields = append([]*FieldPlan{{Name: "id", Kind: "id", Note: note}}, cp.Fields...)
 		}
 	}
 }
@@ -559,7 +634,8 @@ func hashID(parts ...json.RawMessage) string {
 	return hex.EncodeToString(h.Sum(nil))[:15]
 }
 
-func recordID(cp *CollPlan, row map[string]json.RawMessage) string {
+// recordID derives the record id of a row; n is the row's position in the table, counted from 1.
+func recordID(cp *CollPlan, row map[string]json.RawMessage, n int64) string {
 	t := cp.Table
 	if cp.IdMode == "hash" {
 		cols := t.PK
@@ -568,9 +644,12 @@ func recordID(cp *CollPlan, row map[string]json.RawMessage) string {
 				cols = append(cols, c.Name)
 			}
 		}
-		parts := make([]json.RawMessage, len(cols))
+		parts := make([]json.RawMessage, len(cols), len(cols)+1)
 		for i, c := range cols {
 			parts[i] = row[c]
+		}
+		if len(t.PK) == 0 { // nothing makes a row unique: two identical rows must not get the same id
+			parts = append(parts, json.RawMessage(strconv.FormatInt(n, 10)))
 		}
 		return hashID(parts...)
 	}
@@ -657,10 +736,12 @@ func (b *Builder) importTables() error {
 			continue // merged table imported together with auth.users
 		}
 		bt := &batcher{app: b.app, size: 2000}
+		var n int64
 		err := b.stream(selectSQL(cp), func(row map[string]json.RawMessage) error {
 			rec := core.NewRecord(cp.Coll)
 			b.curRow = row
-			rec.Set("id", recordID(cp, row))
+			n++
+			rec.Set("id", recordID(cp, row, n))
 			for _, fp := range cp.Fields {
 				if fp.PGName == "" {
 					continue
@@ -687,7 +768,7 @@ func (b *Builder) importUsers() error {
 	var sel, join string
 	var merged []*FieldPlan
 	if b.users != nil && b.users.Table != nil {
-		join = " left join public." + qi(b.users.PGName) + " p on p.id = u.id"
+		join = " left join public." + qi(b.users.PGName) + " p on p." + qi(b.users.Table.PK[0]) + " = u.id"
 		for _, fp := range b.users.Fields {
 			if fp.Kind == "id" || fp.Kind == "skip" {
 				continue
@@ -939,6 +1020,11 @@ func (b *Builder) copyFiles() error {
 	var mu sync.Mutex
 	var bytesN int64
 	var errs []string
+	fail := func(what string, err error) {
+		mu.Lock()
+		errs = append(errs, what+": "+err.Error())
+		mu.Unlock()
+	}
 	ch := make(chan FileJob)
 	var wg sync.WaitGroup
 	for w := 0; w < 8; w++ {
@@ -946,43 +1032,21 @@ func (b *Builder) copyFiles() error {
 		go func() {
 			defer wg.Done()
 			for j := range ch {
-				if j.Data != nil {
-					if err := fsys.Upload(j.Data, j.CollID+"/"+j.RecID+"/"+j.Filename); err != nil {
-						mu.Lock()
-						errs = append(errs, err.Error())
-						mu.Unlock()
-					} else {
-						mu.Lock()
-						bytesN += int64(len(j.Data))
-						mu.Unlock()
+				data, what := j.Data, j.CollID+"/"+j.RecID+"/"+j.Filename
+				if data == nil {
+					what = j.Bucket + "/" + j.Object
+					segs := strings.Split(j.Object, "/")
+					for i := range segs {
+						segs[i] = url.PathEscape(segs[i])
 					}
-					continue
-				}
-				segs := strings.Split(j.Object, "/")
-				for i := range segs {
-					segs[i] = url.PathEscape(segs[i])
-				}
-				req, _ := http.NewRequest("GET", b.storageURL+"/object/"+j.Bucket+"/"+strings.Join(segs, "/"), nil)
-				setKeyHeaders(req.Header, b.serviceKey)
-				resp, err := client.Do(req)
-				if err != nil {
-					mu.Lock()
-					errs = append(errs, err.Error())
-					mu.Unlock()
-					continue
-				}
-				data, _ := io.ReadAll(resp.Body)
-				resp.Body.Close()
-				if resp.StatusCode != 200 {
-					mu.Lock()
-					errs = append(errs, fmt.Sprintf("%s/%s: HTTP %d", j.Bucket, j.Object, resp.StatusCode))
-					mu.Unlock()
-					continue
+					var err error
+					if data, err = fetchObject(client, b.storageURL+"/object/"+j.Bucket+"/"+strings.Join(segs, "/"), b.serviceKey); err != nil {
+						fail(what, err) // nothing is stored: a partial file would look complete
+						continue
+					}
 				}
 				if err := fsys.Upload(data, j.CollID+"/"+j.RecID+"/"+j.Filename); err != nil {
-					mu.Lock()
-					errs = append(errs, err.Error())
-					mu.Unlock()
+					fail(what, err)
 					continue
 				}
 				mu.Lock()
@@ -996,12 +1060,99 @@ func (b *Builder) copyFiles() error {
 	}
 	close(ch)
 	wg.Wait()
+	sort.Strings(errs)
 	if b.rep.Files == nil {
 		b.rep.Files = map[string]any{}
 	}
 	b.rep.Files["copied"], b.rep.Files["bytes"], b.rep.Files["errors"] = len(b.jobs)-len(errs), bytesN, errs
 	fmt.Printf("  %-18s %9s copied (%s, %d errors)\n", "files", fmtInt(int64(len(b.jobs)-len(errs))), fmtBytes(bytesN), len(errs))
 	return nil
+}
+
+// fetchBackoff is the pause before the second download attempt (doubled before the third).
+var fetchBackoff = time.Second
+
+// stallTimeout is how long a download may go without receiving anything before it is given up. There is no limit
+// on the whole download: a large file on a slow line is fine as long as bytes keep arriving.
+var stallTimeout = 60 * time.Second
+
+// progressReader calls tick whenever bytes arrive.
+type progressReader struct {
+	r    io.Reader
+	tick func()
+}
+
+func (p *progressReader) Read(b []byte) (int, error) {
+	n, err := p.r.Read(b)
+	if n > 0 {
+		p.tick()
+	}
+	return n, err
+}
+
+// fetchObject downloads one Storage object completely. A response that fails, ends early or is shorter than
+// announced is an error, so a partial file is never stored as if it were whole. Failures that can pass
+// (network errors, cut or stalled connections, HTTP 429 and 5xx) are tried three times.
+func fetchObject(client *http.Client, objURL, key string) ([]byte, error) {
+	var last error
+	for attempt := 1; attempt <= 3; attempt++ {
+		if attempt > 1 {
+			time.Sleep(time.Duration(attempt-1) * fetchBackoff)
+		}
+		data, retry, err := fetchOnce(client, objURL, key)
+		if err == nil {
+			return data, nil
+		}
+		last = err
+		if !retry {
+			break
+		}
+	}
+	return nil, last
+}
+
+func fetchOnce(client *http.Client, objURL, key string) (data []byte, retry bool, err error) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, "GET", objURL, nil)
+	if err != nil {
+		return nil, false, err
+	}
+	setKeyHeaders(req.Header, key)
+	var stalled atomic.Bool
+	watchdog := time.AfterFunc(stallTimeout, func() { // also covers a server that never answers
+		stalled.Store(true)
+		cancel()
+	})
+	defer watchdog.Stop()
+	resp, err := client.Do(req)
+	if err != nil {
+		if stalled.Load() {
+			return nil, true, fmt.Errorf("no answer for %s", stallTimeout)
+		}
+		var ue *url.Error
+		if errors.As(err, &ue) {
+			return nil, !ue.Timeout(), ue.Err // without the URL: the caller names the object
+		}
+		return nil, true, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500, fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+	data, err = io.ReadAll(&progressReader{r: resp.Body, tick: func() { watchdog.Reset(stallTimeout) }})
+	if err != nil {
+		if stalled.Load() {
+			return nil, true, fmt.Errorf("download stalled after %s: no data for %s", fmtBytes(int64(len(data))), stallTimeout)
+		}
+		var ne net.Error
+		timeout := errors.As(err, &ne) && ne.Timeout()
+		return nil, !timeout, fmt.Errorf("download stopped after %s: %w", fmtBytes(int64(len(data))), err)
+	}
+	if resp.ContentLength >= 0 && int64(len(data)) != resp.ContentLength {
+		return nil, true, fmt.Errorf("incomplete download: %d of %d bytes", len(data), resp.ContentLength)
+	}
+	return data, false, nil
 }
 
 // pbFieldOf maps another table's column to its PocketBase collection and field name (for join rules).

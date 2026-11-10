@@ -26,8 +26,33 @@ jobs:
             GOOS=${t%/*} GOARCH=${t#*/} CGO_ENABLED=0 go build -o /dev/null ./cmd/sb2pb
           done
 
+  platforms:
+    # The binaries people download: unit tests, a build and a first run on macOS and Windows.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - run: go test ./...
+      - run: go build -o "sb2pb$(go env GOEXE)" ./cmd/sb2pb
+      - name: First run
+        run: |
+          ./sb2pb version
+          ./sb2pb analyze --help > /dev/null
+          # without a connection string and without a terminal: a clear error and exit code 1, no prompt
+          code=0; ./sb2pb analyze < /dev/null || code=$?
+          test "$code" -eq 1
+
   e2e:
-    # Real self-hosted Supabase -> sb2pb -> PocketBase; 52 behaviour checks, 265-cell type matrix, rollback.
+    # Real self-hosted Supabase -> sb2pb -> PocketBase; 66 behaviour checks, 265-cell type matrix, rollback.
     runs-on: ubuntu-latest
     timeout-minutes: 40
     steps:

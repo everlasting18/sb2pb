@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"runtime"
 	"strings"
 
@@ -91,12 +92,39 @@ func (u *UI) Secret(label, hint string) (string, error) {
 		u.Printf("  %s\n", u.dim(hint))
 	}
 	u.Printf("  %s: ", label)
-	b, err := term.ReadPassword(int(os.Stdin.Fd()))
+	fd := int(os.Stdin.Fd())
+	stop := restoreTerminalOnInterrupt(fd)
+	b, err := term.ReadPassword(fd)
+	stop()
 	u.Printf("\n")
 	if err != nil {
 		return "", err
 	}
 	return strings.TrimSpace(string(b)), nil
+}
+
+// restoreTerminalOnInterrupt covers Ctrl+C at a hidden prompt. The echo is off while the value is typed; if the
+// process just died there, the shell would be left without echo. Prompts only happen before anything is changed.
+func restoreTerminalOnInterrupt(fd int) (stop func()) {
+	state, err := term.GetState(fd)
+	if err != nil {
+		return func() {}
+	}
+	sig, done := make(chan os.Signal, 1), make(chan struct{})
+	signal.Notify(sig, os.Interrupt)
+	go func() {
+		select {
+		case <-sig:
+			_ = term.Restore(fd, state)
+			fmt.Fprintln(os.Stderr, "\n"+cancelledMsg)
+			os.Exit(130)
+		case <-done:
+		}
+	}()
+	return func() {
+		signal.Stop(sig)
+		close(done)
+	}
 }
 
 // Confirm asks a yes/no question.

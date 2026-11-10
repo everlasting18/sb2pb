@@ -58,6 +58,15 @@ check("Data", "unicode/emoji text", row[6], e["body"])
 check("Data", "created_at (DEFAULT now() -> autodate) value preserved", "2024-02-01 10:00:00.000Z", e["created_at"])
 a = requests.get(f"{PB}/api/collections/users/records/{seed['alice']['id']}", headers=SU).json()
 check("Data", "profiles merged into users (username, website, birthday)", ("alice", "https://alice.dev", "1995-04-12 00:00:00.000Z"), (a["username"], a["website"], a["birthday"]))
+check("Data", "profiles.phone kept next to the sign-in phone (users.profile_phone, users.phone untouched)", ("0900 000 001", ""), (a.get("profile_phone"), a["phone"]))
+us = requests.get(f"{PB}/api/collections/user_settings/records/{seed['alice']['id']}", headers=SU).json()
+check("Data", "second per-user table (user_settings, PK user_id) is its own collection, record id = user id", ("dark", "vi"), (us.get("theme"), us.get("locale")))
+check("Data", "user_settings row count", q("select count(*) from public.user_settings"), pb_count("user_settings"))
+check("Data", "table without a primary key keeps identical rows", q("select count(*) from public.audit_log"), pb_count("audit_log"))
+imp = requests.get(f"{PB}/api/collections/imported_rows/records?sort=id_col", headers=SU).json().get("items", [])
+check("Data", "columns named id (not the key) and expand are kept as id_col, expand_col", [(1, "x", "first"), (2, "y", "second")], [(r.get("id_col"), r.get("expand_col"), r.get("label")) for r in imp])
+check("Data", "partitioned table is one collection, each row once", (q("select count(*) from public.measurements"), 404),
+      (pb_count("measurements"), requests.get(f"{PB}/api/collections/measurements_2026", headers=SU).status_code))
 dangling = json.load(open(os.path.join(WORK, "sb2pb-report.json")))["migration"]["files"]["danglingRelations"]
 check("Data", "dangling relations after load", 0, sum(dangling.values()))
 
@@ -121,6 +130,17 @@ cid = q("select c.id::text from public.comments c join public.posts p on p.id=c.
 check("Rules", "EXISTS policy: post author (Alice) deletes Dave's comment", 204, requests.delete(f"{PB}/api/collections/comments/records/{cid}", headers=tok["alice"]).status_code)
 cid2 = q("select c.id::text from public.comments c join public.posts p on p.id=c.post_id where p.author_id=%s and c.user_id=%s limit 1", seed["carol"]["id"], seed["bob"]["id"])
 check("Rules", "Dave cannot delete Bob's comment on Carol's post", 404, requests.delete(f"{PB}/api/collections/comments/records/{cid2}", headers=tok["dave"]).status_code)
+settings = f"{PB}/api/collections/user_settings/records/{seed['alice']['id']}"
+check("Rules", "Alice reads her own settings (policy on the user_id key)", 200, requests.get(settings, headers=tok["alice"]).status_code)
+check("Rules", "Bob cannot read Alice's settings", 404, requests.get(settings, headers=tok["bob"]).status_code)
+# tables app users could not reach on Supabase stay locked (superusers only), for guests and signed-in users alike
+jobs = f"{PB}/api/collections/internal_jobs/records"
+check("Rules", "policy TO service_role: guest cannot list", 403, requests.get(jobs).status_code)
+check("Rules", "policy TO service_role: signed-in user cannot list", 403, requests.get(jobs, headers=tok["alice"]).status_code)
+check("Rules", "policy TO service_role: guest cannot create", 403, requests.post(jobs, json={"payload": "injected"}).status_code)
+check("Rules", "policy TO supabase_auth_admin (RBAC guide): guest cannot list user_roles", 403, requests.get(f"{PB}/api/collections/user_roles/records").status_code)
+check("Rules", "table privileges revoked from anon/authenticated: guest cannot list", 403, requests.get(f"{PB}/api/collections/ledger/records").status_code)
+check("Rules", "locked tables still hold their rows", (2, 1, 1), (pb_count("internal_jobs"), pb_count("user_roles"), pb_count("ledger")))
 
 # ---------- E. files ----------
 def sb_file(bucket, name):
