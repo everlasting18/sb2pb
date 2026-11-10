@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# End-to-end test: real self-hosted Supabase -> sb2pb migrate -> PocketBase, then 52 behaviour checks,
+# End-to-end test: real self-hosted Supabase -> sb2pb migrate -> PocketBase, then 63 behaviour checks,
 # a 265-cell data type matrix and a rollback. Needs: docker (compose v2), go, python3 + e2e/requirements.txt.
 #   e2e/run.sh            run everything, then tear the stack down
 #   KEEP=1 e2e/run.sh     leave Supabase and PocketBase running afterwards

@@ -8,6 +8,7 @@ create table public.profiles (
   avatar_url text,           -- storage path or full public URL
   website text,
   birthday date,
+  phone text,                -- contact number typed by the user; must not replace the sign-in phone from auth.users
   created_at timestamptz not null default now(),
   updated_at timestamptz
 );
@@ -93,6 +94,38 @@ create policy "Comment owner or post author can delete" on public.comments for d
 create policy "Likes are public" on public.post_likes for select using (true);
 create policy "Like as yourself" on public.post_likes for insert to authenticated with check (auth.uid() = user_id);
 create policy "Unlike own" on public.post_likes for delete to authenticated using (auth.uid() = user_id);
+
+-- A second table keyed by the user id, with a primary key that is not called "id". profiles is merged into
+-- users; this one must stay a collection of its own (record id = user id), with nothing lost on either side.
+create table public.user_settings (
+  user_id uuid primary key references auth.users (id) on delete cascade,
+  theme text not null default 'light',
+  locale text
+);
+alter table public.user_settings enable row level security;
+create policy "Read own settings" on public.user_settings for select to authenticated using (auth.uid() = user_id);
+create policy "Update own settings" on public.user_settings for update to authenticated using (auth.uid() = user_id);
+
+-- Tables app users cannot reach on Supabase must stay locked on PocketBase: a policy for service_role only,
+-- a policy for an internal role (the pattern of Supabase's RBAC guide), and a table without privileges.
+create table public.internal_jobs (id bigint generated always as identity primary key, payload text);
+alter table public.internal_jobs enable row level security;
+create policy "Service role full access" on public.internal_jobs for all to service_role using (true) with check (true);
+insert into public.internal_jobs (payload) values ('nightly export'), ('invoice run');
+
+create table public.user_roles (
+  id bigint generated always as identity primary key,
+  user_id uuid references auth.users (id) on delete cascade,
+  role text not null
+);
+alter table public.user_roles enable row level security;
+create policy "Allow auth admin to read user roles" on public.user_roles as permissive for select to supabase_auth_admin using (true);
+
+create table public.ledger (id bigint generated always as identity primary key, note text);
+alter table public.ledger enable row level security;
+create policy "Readable by policy, but nobody has the privilege" on public.ledger for select using (true);
+revoke all on public.ledger from anon, authenticated;
+insert into public.ledger (note) values ('opening balance');
 
 -- Storage buckets & policies (Supabase storage RLS lives on storage.objects)
 insert into storage.buckets (id, name, public, file_size_limit) values ('avatars', 'avatars', true, 5242880), ('documents', 'documents', false, 52428800);

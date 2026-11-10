@@ -27,7 +27,7 @@ jobs:
           done
 
   e2e:
-    # Real self-hosted Supabase -> sb2pb -> PocketBase; 52 behaviour checks, 265-cell type matrix, rollback.
+    # Real self-hosted Supabase -> sb2pb -> PocketBase; 63 behaviour checks, 265-cell type matrix, rollback.
     runs-on: ubuntu-latest
     timeout-minutes: 40
     steps:
