@@ -44,6 +44,11 @@ var (
 	reRefOnly    = regexp.MustCompile(`^[a-z0-9]{15,30}$`)
 )
 
+// sb2pb reads everything in one session (session settings, one snapshot transaction, prepared statements).
+// A pooler in transaction mode hands every transaction to another server connection, so that cannot work.
+const transactionPoolerHint = "this connection goes through a pooler in transaction mode (on Supabase: the Transaction pooler, port 6543), which sb2pb cannot use: it needs one session for the whole read. " +
+	"Use the Session pooler string instead: Supabase Dashboard → Connect → Session pooler (port 5432)"
+
 // ParseSource validates a connection string and works out the project ref.
 func ParseSource(dsn string) (*Source, error) {
 	dsn = strings.TrimSpace(dsn)
@@ -58,6 +63,9 @@ func ParseSource(dsn string) (*Source, error) {
 	cfg, err := pgx.ParseConfig(dsn)
 	if err != nil {
 		return nil, errors.New("this is not a valid Postgres connection string: " + redactErr(err.Error(), dsn))
+	}
+	if host := strings.ToLower(cfg.Host); cfg.Port == 6543 && (strings.HasSuffix(host, ".supabase.com") || strings.HasSuffix(host, ".supabase.co")) {
+		return nil, errors.New(transactionPoolerHint)
 	}
 	cfg.ConnectTimeout = 15 * time.Second
 	cfg.RuntimeParams["application_name"] = "sb2pb"
@@ -133,6 +141,8 @@ func friendly(err error) string {
 			return "database not found: Supabase projects use the database name \"postgres\""
 		case "57014":
 			return "a query was cancelled by the statement timeout"
+		case "42P05", "26000": // prepared statement already exists / does not exist: statements landed on different server connections
+			return transactionPoolerHint
 		case "XX000":
 			if strings.Contains(pgErr.Message, "Tenant or user not found") {
 				return "the pooler did not recognise this project: copy the full Session pooler string from Supabase Dashboard → Connect instead of editing the host or user"

@@ -4,8 +4,10 @@ sb2pb handles database passwords, Supabase secret keys and PocketBase superuser 
 
 ## How credentials are handled
 
-- They are read from hidden terminal prompts or environment variables, never from command-line
-  flags (flags end up in shell history and process lists).
+- Keys and passwords are read from hidden terminal prompts or environment variables, never from
+  command-line flags (flags end up in shell history and process lists). The connection string,
+  which contains the database password, can also be given with `--from`; sb2pb warns when it is,
+  so prefer the prompt or `SUPABASE_DB_URL`.
 - They are kept in memory only. The migration report, the generated hooks and the terminal output
   contain no credentials; the connection string is only ever printed with the password masked.
 - The Supabase session runs with `default_transaction_read_only = on`.

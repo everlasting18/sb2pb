@@ -32,7 +32,7 @@ Usage:
 
 Run "sb2pb <command> --help" for the options of a command.
 
-Environment variables (used instead of prompts; secrets are never taken as flags):
+Environment variables (used instead of prompts; keys and passwords are never taken as flags):
   SUPABASE_DB_URL         Supabase connection string (Dashboard → Connect → Session pooler)
   SUPABASE_SECRET_KEY     secret key (sb_secret_...) or legacy service_role key, to copy Storage files
   PB_URL                  PocketBase URL
@@ -78,14 +78,22 @@ func Main(args []string, version string) int {
 	case errors.Is(err, flag.ErrHelp):
 		return 0
 	case errors.Is(err, errCancelled):
-		fmt.Fprintln(os.Stderr, "\nCancelled. Nothing was changed on the PocketBase instance.")
+		fmt.Fprintln(os.Stderr, cancelledMsg)
 		return 130
+	case errors.Is(err, errFilesMissing): // the migration is in place; scripts still need to notice
+		fmt.Fprintf(os.Stderr, "\n%s %s\n", ui.amber("incomplete:"), err)
+		return 3
 	}
 	fmt.Fprintf(os.Stderr, "\n%s %s\n", ui.red("error:"), err)
 	return 1
 }
 
 var errCancelled = errors.New("cancelled")
+
+const cancelledMsg = "\nCancelled. Nothing was changed on the PocketBase instance."
+
+// errFilesMissing: the data was migrated and restored, but some Storage files could not be copied (exit code 3).
+var errFilesMissing = errors.New("the migration is in place, but not every file was copied")
 
 func newFlags(name, summary string) *flag.FlagSet {
 	fs := flag.NewFlagSet(name, flag.ContinueOnError)

@@ -1,6 +1,7 @@
 package app
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -22,6 +23,10 @@ func TestParseSource(t *testing.T) {
 		{"postgresql://postgres:pw@localhost:54322/postgres", "", "", ""},
 		{"postgresql://postgres.abcd:[YOUR-PASSWORD]@aws-0-eu.pooler.supabase.com:5432/postgres", "", "", "[YOUR-PASSWORD]"},
 		{"https://abcdefghijklmnopqrst.supabase.co", "", "", "not a Postgres connection string"},
+		// transaction pooler: refused with a pointer to the session pooler; port 6543 elsewhere is not judged
+		{"postgresql://postgres.abcdefghijklmnopqrst:pw@aws-0-eu-central-1.pooler.supabase.com:6543/postgres", "", "", "Session pooler"},
+		{"postgresql://postgres:pw@db.abcdefghijklmnopqrst.supabase.co:6543/postgres", "", "", "Session pooler"},
+		{"postgresql://postgres:pw@db.internal.example:6543/postgres", "", "", ""},
 		{"", "", "", "empty"},
 	}
 	for _, c := range cases {
@@ -492,6 +497,14 @@ func TestFetchObjectRejectsPartialDownloads(t *testing.T) {
 		w.(http.Flusher).Flush()
 		<-r.Context().Done()
 	})
+	mux.HandleFunc("/slow", func(w http.ResponseWriter, _ *http.Request) { // 8 chunks, 40 ms apart: 320 ms in total
+		hits.Add(1)
+		for i := 0; i < 8; i++ {
+			_, _ = w.Write([]byte(body[i*512 : (i+1)*512]))
+			w.(http.Flusher).Flush()
+			time.Sleep(40 * time.Millisecond)
+		}
+	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 	client := &http.Client{Timeout: 5 * time.Second}
@@ -517,9 +530,113 @@ func TestFetchObjectRejectsPartialDownloads(t *testing.T) {
 	if _, err := fetchObject(client, srv.URL+"/missing", ""); err == nil || !strings.Contains(err.Error(), "404") || hits.Load() != 1 {
 		t.Errorf("HTTP 404 is final: %v after %d tries", err, hits.Load())
 	}
+	// no bytes for stallTimeout: given up and retried, whatever the size of the file or the client's own limit
+	oldStall := stallTimeout
+	stallTimeout = 100 * time.Millisecond
+	hits.Store(0)
+	if data, err := fetchObject(&http.Client{}, srv.URL+"/stall", ""); err == nil || data != nil || !strings.Contains(err.Error(), "stalled") || hits.Load() != 3 {
+		t.Errorf("a stalled download must be given up and retried: %d bytes, %v, %d tries", len(data), err, hits.Load())
+	}
+	// a slow download that keeps sending is not a stall
+	hits.Store(0)
+	if data, err := fetchObject(&http.Client{}, srv.URL+"/slow", ""); err != nil || string(data) != body || hits.Load() != 1 {
+		t.Errorf("a slow but steady download must succeed: %d bytes, %v, %d tries", len(data), err, hits.Load())
+	}
+	stallTimeout = oldStall
+	// the client's own timeout is final: trying again would only wait as long
 	hits.Store(0)
 	impatient := &http.Client{Timeout: 200 * time.Millisecond}
 	if data, err := fetchObject(impatient, srv.URL+"/stall", ""); err == nil || data != nil || hits.Load() != 1 {
-		t.Errorf("a stalled download must fail once the timeout passes, without a retry: %d bytes, %v, %d tries", len(data), err, hits.Load())
+		t.Errorf("a client timeout must fail without a retry: %d bytes, %v, %d tries", len(data), err, hits.Load())
+	}
+}
+
+// Schemas PocketBase cannot hold are reported by the analysis and stop migrate before the target is touched.
+func TestSchemaStoppers(t *testing.T) {
+	col := func(names ...string) []*Column {
+		out := []*Column{{Name: "id", TypName: "uuid", Type: "uuid"}}
+		for _, n := range names {
+			out = append(out, &Column{Name: n, TypName: "text", Type: "text"})
+		}
+		return out
+	}
+	tbl := func(name string, cols ...string) *Table {
+		return &Table{Name: name, PK: []string{"id"}, Columns: col(cols...)}
+	}
+	titles := func(tables ...*Table) string {
+		r := buildReadiness(&Analysis{Tables: tables})
+		var out []string
+		for _, it := range r.Stoppers() {
+			if it.Severity != "blocker" || it.Handling == "" {
+				t.Errorf("a stopper must be a blocker with a way out: %+v", it)
+			}
+			out = append(out, it.Title)
+		}
+		return strings.Join(out, " | ")
+	}
+	if got := titles(tbl("posts", "title"), tbl("CamelCase", "userId"), tbl("_internal", "v"), tbl("2fa_codes", "code")); got != "" {
+		t.Errorf("valid names must not stop a migration: %s", got)
+	}
+	for _, c := range []struct {
+		tables []*Table
+		want   []string
+	}{
+		{[]*Table{tbl("Order Items", "price")}, []string{"Table names", "`Order Items`"}},
+		{[]*Table{tbl("khách_hàng", "ten")}, []string{"Table names", "`khách_hàng`"}},
+		{[]*Table{tbl("my-table", "v")}, []string{"Table names", "`my-table`"}},
+		{[]*Table{tbl("orders", "Unit Price", "my-col", "tên")}, []string{"Column names", "`orders.Unit Price`", "`orders.my-col`", "`orders.tên`"}},
+		{[]*Table{tbl("orders", "Email", "email")}, []string{"Column names", "once case is ignored"}},
+		{[]*Table{tbl("users", "nickname")}, []string{"built-in PocketBase collection", "`users`"}},
+		{[]*Table{tbl("Posts", "a"), tbl("posts", "b")}, []string{"differ only in upper/lower case", "`Posts` / `posts`"}},
+	} {
+		got := titles(c.tables...)
+		for _, w := range c.want {
+			if !strings.Contains(got, w) {
+				t.Errorf("%s: stoppers %q should mention %q", c.tables[0].Name, got, w)
+			}
+		}
+	}
+	// a users table keyed by the auth user id is the profile table, not a clash
+	if got := titles(userKeyed("users", "id", "nickname")); got != "" {
+		t.Errorf("public.users keyed by auth.users is merged, not refused: %s", got)
+	}
+}
+
+// Columns named like a reserved PocketBase field are kept under another name, and rows of a table without a
+// primary key get distinct ids even when two rows are identical.
+func TestReservedColumnsAndRowsWithoutKey(t *testing.T) {
+	text := func(names ...string) []*Column {
+		var out []*Column
+		for _, n := range names {
+			out = append(out, &Column{Name: n, TypName: "text", Type: "text"})
+		}
+		return out
+	}
+	b := &Builder{a: &Analysis{Tables: []*Table{
+		{Name: "imported", Columns: text("id", "expand", "collectionId", "name", "id_col")}, // no primary key
+		{Name: "pairs", PK: []string{"id", "lang"}, Columns: text("id", "lang", "v")},       // id is only part of the key
+		{Name: "docs", PK: []string{"code"}, Columns: text("code", "ID", "title")},          // another column is the key
+	}}}
+	b.plan()
+	for ref, want := range map[string]string{"imported.id": "id_col_", "imported.expand": "expand_col", "imported.collectionId": "collectionId_col",
+		"imported.name": "name", "pairs.id": "id_col", "pairs.lang": "lang", "docs.ID": "ID_col", "docs.title": "title"} {
+		tbl, col, _ := strings.Cut(ref, ".")
+		if fp := b.byPG[tbl].field(col); fp == nil || fp.Name != want {
+			t.Errorf("%s -> %+v, want field %q", ref, fp, want)
+		}
+	}
+	if got := buildReadiness(b.a).Stoppers(); len(got) != 0 {
+		t.Errorf("renamed columns must not stop the migration: %+v", got)
+	}
+	noKey, pairs := b.byPG["imported"], b.byPG["pairs"]
+	row := map[string]json.RawMessage{"id": json.RawMessage(`"7"`), "expand": json.RawMessage(`"x"`), "lang": json.RawMessage(`"vi"`)}
+	if a, c := recordID(noKey, row, 1), recordID(noKey, row, 2); a == c || len(a) != 15 {
+		t.Errorf("identical rows without a key must get different ids: %q %q", a, c)
+	}
+	if a, c := recordID(noKey, row, 5), recordID(noKey, row, 5); a != c {
+		t.Errorf("the same row at the same position must keep its id: %q %q", a, c)
+	}
+	if a, c := recordID(pairs, row, 1), recordID(pairs, row, 2); a != c {
+		t.Errorf("with a primary key the id depends on the key only: %q %q", a, c)
 	}
 }

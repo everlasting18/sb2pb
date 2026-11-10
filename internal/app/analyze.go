@@ -219,9 +219,10 @@ func analyze(ctx context.Context, db *pgx.Conn, opts AnalyzeOptions) (*Analysis,
 		extract(epoch from now() - coalesce((select stats_reset from pg_stat_database where datname = current_database()), pg_postmaster_start_time()))::float8
 		from pg_stat_user_tables where schemaname = 'public'`).Scan(&a.Writes, &a.StatsSecs)
 
+	// Partitions are left out: reading the partitioned table itself returns the rows of all of them, once.
 	rows, err := db.Query(ctx, `select c.oid, c.relname, c.relkind::text, c.relrowsecurity, coalesce(pg_get_viewdef(c.oid, true), '')
 		from pg_class c join pg_namespace n on n.oid = c.relnamespace
-		where n.nspname = 'public' and c.relkind in ('r','p','v','m') order by c.relname`)
+		where n.nspname = 'public' and c.relkind in ('r','p','v','m') and not c.relispartition order by c.relname`)
 	if err != nil {
 		return nil, err
 	}
@@ -378,7 +379,7 @@ func analyze(ctx context.Context, db *pgx.Conn, opts AnalyzeOptions) (*Analysis,
 	grows, err := db.Query(ctx, `select c.oid, r.rolname::text, p.priv, has_table_privilege(r.oid, c.oid, p.priv)
 		from pg_class c join pg_namespace n on n.oid = c.relnamespace
 		cross join pg_roles r cross join unnest(array['SELECT', 'INSERT', 'UPDATE', 'DELETE']) as p(priv)
-		where n.nspname = 'public' and c.relkind in ('r','p','v','m') and r.rolname in ('anon', 'authenticated')`)
+		where n.nspname = 'public' and c.relkind in ('r','p','v','m') and not c.relispartition and r.rolname in ('anon', 'authenticated')`)
 	if err != nil {
 		return nil, fmt.Errorf("reading table privileges: %w", err)
 	}

@@ -20,6 +20,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"ganigeorgiev.com/pocketbase/pocketbase/core"
@@ -105,6 +106,12 @@ type Builder struct {
 	mu         sync.Mutex
 	curRow     map[string]json.RawMessage
 }
+
+// pbReservedFields are names a PocketBase field cannot have: the record id (a column called id that is not the
+// single primary key) and the names PocketBase reserves in records and filters. Such columns are kept under
+// <name>_col. Compared in lower case, because SQLite column names ignore case.
+var pbReservedFields = map[string]bool{"id": true, "expand": true, "collectionid": true, "collectionname": true,
+	"null": true, "true": true, "false": true, "_rowid_": true}
 
 // usersReserved are the fields of the users collection a merged profile column must never overwrite: PocketBase's
 // own auth fields and the ones importUsers fills from auth.users. Compared in lower case.
@@ -271,6 +278,14 @@ func (b *Builder) plan() {
 					fp.Kind, fp.Note = "skip", "duplicate of auth.users.created_at (users.created)"
 				}
 			}
+			if fp.Kind != "skip" && pbReservedFields[strings.ToLower(fp.Name)] {
+				reserved := fp.Name
+				fp.Name += "_col"
+				for t.Col(fp.Name) != nil {
+					fp.Name += "_"
+				}
+				fp.Note = strings.TrimPrefix(fp.Note+"; ", "; ") + fmt.Sprintf("renamed: %q is a reserved name in PocketBase", reserved)
+			}
 		}
 		for _, ck := range t.Checks {
 			if m := reCharLen.FindStringSubmatch(ck); m != nil && m[1] == m[3] {
@@ -287,10 +302,12 @@ func (b *Builder) plan() {
 			what := "composite PK (" + strings.Join(t.PK, ",") + ")"
 			if len(t.PK) == 1 {
 				what = "text PK with values PocketBase rejects as ids (/ . space, reserved names...)"
-			} else if len(t.PK) == 0 {
-				what = "no PK"
 			}
-			cp.Fields = append([]*FieldPlan{{Name: "id", Kind: "id", Note: what + " -> id = sha1(key)[:15]"}}, cp.Fields...)
+			note := what + " -> id = sha1(key)[:15]"
+			if len(t.PK) == 0 {
+				note = "no PK -> id = sha1(row and its position)[:15], so identical rows are all kept"
+			}
+			cp.Fields = append([]*FieldPlan{{Name: "id", Kind: "id", Note: note}}, cp.Fields...)
 		}
 	}
 }
@@ -617,7 +634,8 @@ func hashID(parts ...json.RawMessage) string {
 	return hex.EncodeToString(h.Sum(nil))[:15]
 }
 
-func recordID(cp *CollPlan, row map[string]json.RawMessage) string {
+// recordID derives the record id of a row; n is the row's position in the table, counted from 1.
+func recordID(cp *CollPlan, row map[string]json.RawMessage, n int64) string {
 	t := cp.Table
 	if cp.IdMode == "hash" {
 		cols := t.PK
@@ -626,9 +644,12 @@ func recordID(cp *CollPlan, row map[string]json.RawMessage) string {
 				cols = append(cols, c.Name)
 			}
 		}
-		parts := make([]json.RawMessage, len(cols))
+		parts := make([]json.RawMessage, len(cols), len(cols)+1)
 		for i, c := range cols {
 			parts[i] = row[c]
+		}
+		if len(t.PK) == 0 { // nothing makes a row unique: two identical rows must not get the same id
+			parts = append(parts, json.RawMessage(strconv.FormatInt(n, 10)))
 		}
 		return hashID(parts...)
 	}
@@ -715,10 +736,12 @@ func (b *Builder) importTables() error {
 			continue // merged table imported together with auth.users
 		}
 		bt := &batcher{app: b.app, size: 2000}
+		var n int64
 		err := b.stream(selectSQL(cp), func(row map[string]json.RawMessage) error {
 			rec := core.NewRecord(cp.Coll)
 			b.curRow = row
-			rec.Set("id", recordID(cp, row))
+			n++
+			rec.Set("id", recordID(cp, row, n))
 			for _, fp := range cp.Fields {
 				if fp.PGName == "" {
 					continue
@@ -1049,9 +1072,27 @@ func (b *Builder) copyFiles() error {
 // fetchBackoff is the pause before the second download attempt (doubled before the third).
 var fetchBackoff = time.Second
 
+// stallTimeout is how long a download may go without receiving anything before it is given up. There is no limit
+// on the whole download: a large file on a slow line is fine as long as bytes keep arriving.
+var stallTimeout = 60 * time.Second
+
+// progressReader calls tick whenever bytes arrive.
+type progressReader struct {
+	r    io.Reader
+	tick func()
+}
+
+func (p *progressReader) Read(b []byte) (int, error) {
+	n, err := p.r.Read(b)
+	if n > 0 {
+		p.tick()
+	}
+	return n, err
+}
+
 // fetchObject downloads one Storage object completely. A response that fails, ends early or is shorter than
 // announced is an error, so a partial file is never stored as if it were whole. Failures that can pass
-// (network errors, cut connections, HTTP 429 and 5xx) are tried three times; a timeout is not retried.
+// (network errors, cut or stalled connections, HTTP 429 and 5xx) are tried three times.
 func fetchObject(client *http.Client, objURL, key string) ([]byte, error) {
 	var last error
 	for attempt := 1; attempt <= 3; attempt++ {
@@ -1071,13 +1112,24 @@ func fetchObject(client *http.Client, objURL, key string) ([]byte, error) {
 }
 
 func fetchOnce(client *http.Client, objURL, key string) (data []byte, retry bool, err error) {
-	req, err := http.NewRequest("GET", objURL, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, "GET", objURL, nil)
 	if err != nil {
 		return nil, false, err
 	}
 	setKeyHeaders(req.Header, key)
+	var stalled atomic.Bool
+	watchdog := time.AfterFunc(stallTimeout, func() { // also covers a server that never answers
+		stalled.Store(true)
+		cancel()
+	})
+	defer watchdog.Stop()
 	resp, err := client.Do(req)
 	if err != nil {
+		if stalled.Load() {
+			return nil, true, fmt.Errorf("no answer for %s", stallTimeout)
+		}
 		var ue *url.Error
 		if errors.As(err, &ue) {
 			return nil, !ue.Timeout(), ue.Err // without the URL: the caller names the object
@@ -1088,8 +1140,11 @@ func fetchOnce(client *http.Client, objURL, key string) (data []byte, retry bool
 	if resp.StatusCode != http.StatusOK {
 		return nil, resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500, fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
-	data, err = io.ReadAll(resp.Body)
+	data, err = io.ReadAll(&progressReader{r: resp.Body, tick: func() { watchdog.Reset(stallTimeout) }})
 	if err != nil {
+		if stalled.Load() {
+			return nil, true, fmt.Errorf("download stalled after %s: no data for %s", fmtBytes(int64(len(data))), stallTimeout)
+		}
 		var ne net.Error
 		timeout := errors.As(err, &ne) && ne.Timeout()
 		return nil, !timeout, fmt.Errorf("download stopped after %s: %w", fmtBytes(int64(len(data))), err)

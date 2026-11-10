@@ -72,6 +72,10 @@ func runMigrate(ui *UI, args []string) error {
 	if !a.HasAuth {
 		ui.Warn("No Supabase auth schema found: is this a Supabase database?")
 	}
+	if stops := rep.Stoppers(); len(stops) > 0 { // found before the target is even contacted
+		return fmt.Errorf("this project cannot be migrated as it is: %s listed above must be fixed on Supabase first (--allow-blockers does not apply). Nothing was changed on PocketBase",
+			pl(int64(len(stops)), "blocker", "blockers"))
+	}
 	if n := rep.Count("blocker"); n > 0 && !o.allowBlockers {
 		if !ui.interactive || o.yes {
 			return fmt.Errorf("%d blocker(s) found; fix them first or pass --allow-blockers to migrate anyway", n)
@@ -141,6 +145,9 @@ func runMigrate(ui *UI, args []string) error {
 		return err
 	}
 	nextSteps(ui, res, src, tg, o.report)
+	if errs, _ := res.Migration.Files["errors"].([]string); len(errs) > 0 {
+		return fmt.Errorf("%w: %s missing (listed above and in %s)", errFilesMissing, pl(int64(len(errs)), "file is", "files are"), o.report)
+	}
 	return nil
 }
 
@@ -388,7 +395,7 @@ func execute(ctx context.Context, ui *UI, rc *runCtx) (res *migrationResult, err
 	res.Migration = mrep
 	b := &Builder{ctx: ctx, db: db, app: app, a: a, storageURL: rc.storageURL, serviceKey: rc.secretKey, skipFiles: rc.storageURL == "",
 		linked: map[string]bool{}, rep: mrep, warnings: map[string]int{}, provider: resolveProviders(a.Auth.Providers),
-		http: &http.Client{Timeout: 10 * time.Minute}}
+		http: &http.Client{}} // no overall limit: large files take long; fetchObject stops a download that stalls
 	b.plan()
 	steps3 := []struct {
 		name string

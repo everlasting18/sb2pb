@@ -73,7 +73,7 @@ Or download a binary from the [releases](https://github.com/everlasting18/sb2pb/
 
 | | Where to find it |
 |---|---|
-| Supabase connection string | Supabase Dashboard → **Connect** → **Session pooler** (the direct `db.<ref>.supabase.co` host is IPv6-only) |
+| Supabase connection string | Supabase Dashboard → **Connect** → **Session pooler**, port 5432 (the direct `db.<ref>.supabase.co` host is IPv6-only; the Transaction pooler on port 6543 is refused, sb2pb needs one session) |
 | Supabase secret key (only if you have Storage files) | Dashboard → Project Settings → **API Keys** → secret key `sb_secret_...` (the legacy `service_role` key also works) |
 | A **fresh** PocketBase instance | PocketBase **v0.41.1** recommended (see [Compatibility](#compatibility)), self-hosted or on [Pocketbasecloud](https://pocketbasecloud.com) |
 | Its superuser email and password | the account you created when setting up the instance |
@@ -116,6 +116,10 @@ export PB_SUPERUSER_EMAIL='admin@example.com'
 export PB_SUPERUSER_PASSWORD='...'
 sb2pb migrate --yes
 ```
+
+Exit codes: `0` done, `1` failed (the PocketBase data was not replaced unless the message says so),
+`2` wrong usage, `3` migrated but some Storage files could not be copied (they are listed), `130`
+cancelled.
 
 With Docker, pass `--user "$(id -u):$(id -g)"` so the image can write the report and hooks into the
 mounted folder; sb2pb checks this before it touches anything.
@@ -161,6 +165,7 @@ the restored data so the server starts again, and lists them.
 | Supabase | PocketBase |
 |---|---|
 | Tables, primary/foreign keys, unique constraints, indexes | Collections, relation fields, unique indexes |
+| Tables without a primary key, composite keys, partitioned tables | Collections with derived record ids (identical rows are all kept); a partitioned table is one collection |
 | UUID primary keys | Kept as record ids, so links and URLs keep working |
 | `auth.users` + a `profiles` table keyed by user id | The `users` auth collection (profile columns merged in; a column named like a sign-in field, such as `email` or `phone`, becomes `profile_email`, `profile_phone`) |
 | Other tables keyed by user id (`user_settings`, `customers`…) | Collections of their own, with the user id as record id |
@@ -186,11 +191,22 @@ Edge Functions, other triggers and Postgres function bodies, Realtime subscripti
 pgvector similarity search, full-text search (`tsvector`), PostGIS shapes other than points,
 SMS/phone login, anonymous users, TOTP factors, and your client code (supabase-js → PocketBase SDK).
 
+### Not supported yet (found before anything moves)
+
+PocketBase names may only contain letters, digits and `_`. `analyze` lists the following as blockers
+and `migrate` stops before the PocketBase instance is touched; rename them on Supabase first:
+
+- table or column names with spaces, dashes or non-ASCII letters, or that differ only in case;
+- a `public.users` table that is not keyed by the auth user id (the name belongs to PocketBase's
+  own users collection).
+
 ### Behaviour that changes
 
 - Files referenced from a table row (for example `attachments.file_path`) are served under that
   collection's view rule. Storage policies of a private bucket, such as "only the uploader can read",
   no longer apply. The readiness check lists each case so you can tighten the rule.
+- A column called `id` that is not the primary key, and columns named `expand`, `collectionId` or
+  `collectionName`, are kept as `<name>_col`: PocketBase reserves those names.
 - PocketBase adds a random suffix to the names of newly uploaded files (`quote_vdm9dbde8a.pdf`);
   migrated files keep their names. Store the original name in a text field if your app shows it.
 - Ported RPC hooks run without API rules. A `SECURITY INVOKER` function relied on RLS, so check
@@ -212,8 +228,10 @@ SMS/phone login, anonymous users, TOTP factors, and your client code (supabase-j
 - The Supabase session is read-only; nothing in your Supabase project is changed.
 - The PocketBase instance must be empty; it is backed up before anything is replaced.
 - The working copy lives in a private temporary directory and is deleted afterwards.
-- Secrets are only read from hidden prompts or environment variables, never from flags, and are
-  not written to logs or the report.
+- Keys and passwords are only read from hidden prompts or environment variables, never from flags,
+  and are not written to logs or the report. The connection string contains the database password:
+  `--from` accepts it for convenience and warns that it then sits in your shell history, so prefer
+  the prompt or `SUPABASE_DB_URL`.
 
 ## Compatibility
 
