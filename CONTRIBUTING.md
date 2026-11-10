@@ -65,8 +65,20 @@ Types: `feat` (new behaviour), `fix` (bug), `docs`, `test`, `refactor` (no behav
 
 ## Releasing
 
-Move the "Unreleased" entries in `CHANGELOG.md` under the new version, then tag `vX.Y.Z` and push
-the tag (`v0.2.0` for new features, `v0.1.1` for fixes only). The release workflow builds binaries for macOS, Linux and Windows,
-signs the checksums, publishes the Docker image and updates the Homebrew tap and Scoop bucket.
-It needs a `HOMEBREW_TAP_TOKEN` secret with write access to `everlasting18/homebrew-tap` and
-`everlasting18/scoop-bucket`.
+1. Run the **hosted smoke** workflow (Actions → hosted smoke → Run workflow). It migrates a real hosted
+   Supabase test project into a throwaway PocketBase, which the self-hosted e2e stack cannot cover.
+   It needs the `SMOKE_SUPABASE_DB_URL` secret (and `SMOKE_SUPABASE_SECRET_KEY` for Storage files).
+2. Rehearse with a release candidate: tag `vX.Y.Z-rc.1` and push the tag. It runs the whole release
+   workflow and publishes a GitHub pre-release with binaries, signature and Docker image, but leaves
+   the `latest` image tag, the Homebrew tap and the Scoop bucket alone. The `verify` job then downloads
+   what was published on Linux, macOS and Windows, checks signature and checksum, and runs it.
+3. Move the "Unreleased" entries in `CHANGELOG.md` under the new version, then tag `vX.Y.Z` and push
+   the tag (`v0.2.0` for new features, `v0.1.1` for fixes only). The release workflow builds binaries
+   for macOS, Linux and Windows, signs the checksums, publishes the Docker image and updates the
+   Homebrew tap and Scoop bucket; `verify` also installs the Homebrew cask on macOS.
+
+The workflow needs a `HOMEBREW_TAP_TOKEN` secret with write access to `everlasting18/homebrew-tap` and
+`everlasting18/scoop-bucket`; it checks that access before anything is published.
+
+Never move or re-create a published version tag: the Go module proxy keeps the first content it saw.
+If a release is wrong, fix it and release the next patch version.
