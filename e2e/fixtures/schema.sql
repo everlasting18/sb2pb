@@ -127,6 +127,18 @@ create policy "Readable by policy, but nobody has the privilege" on public.ledge
 revoke all on public.ledger from anon, authenticated;
 insert into public.ledger (note) values ('opening balance');
 
+-- Shapes that used to stop a migration halfway: identical rows in a table without a primary key, columns
+-- named like a reserved PocketBase field (id outside the key, expand), and a partitioned table, which must
+-- become one collection with each row once.
+create table public.audit_log (actor text, action text, at timestamptz);
+insert into public.audit_log values ('alice', 'login', '2026-01-01'), ('alice', 'login', '2026-01-01'), ('bob', 'logout', '2026-01-02');
+create table public.imported_rows (id int, expand text, label text);
+insert into public.imported_rows values (1, 'x', 'first'), (2, 'y', 'second');
+create table public.measurements (sensor int, day date, v numeric, primary key (sensor, day)) partition by range (day);
+create table public.measurements_2026 partition of public.measurements for values from ('2026-01-01') to ('2027-01-01');
+create table public.measurements_2027 partition of public.measurements for values from ('2027-01-01') to ('2028-01-01');
+insert into public.measurements values (1, '2026-05-05', 1.5), (2, '2026-06-06', 2.5), (1, '2027-02-02', 3.5);
+
 -- Storage buckets & policies (Supabase storage RLS lives on storage.objects)
 insert into storage.buckets (id, name, public, file_size_limit) values ('avatars', 'avatars', true, 5242880), ('documents', 'documents', false, 52428800);
 create policy "Avatar upload own folder" on storage.objects for insert to authenticated

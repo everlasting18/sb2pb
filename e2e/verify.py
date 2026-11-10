@@ -62,6 +62,11 @@ check("Data", "profiles.phone kept next to the sign-in phone (users.profile_phon
 us = requests.get(f"{PB}/api/collections/user_settings/records/{seed['alice']['id']}", headers=SU).json()
 check("Data", "second per-user table (user_settings, PK user_id) is its own collection, record id = user id", ("dark", "vi"), (us.get("theme"), us.get("locale")))
 check("Data", "user_settings row count", q("select count(*) from public.user_settings"), pb_count("user_settings"))
+check("Data", "table without a primary key keeps identical rows", q("select count(*) from public.audit_log"), pb_count("audit_log"))
+imp = requests.get(f"{PB}/api/collections/imported_rows/records?sort=id_col", headers=SU).json().get("items", [])
+check("Data", "columns named id (not the key) and expand are kept as id_col, expand_col", [(1, "x", "first"), (2, "y", "second")], [(r.get("id_col"), r.get("expand_col"), r.get("label")) for r in imp])
+check("Data", "partitioned table is one collection, each row once", (q("select count(*) from public.measurements"), 404),
+      (pb_count("measurements"), requests.get(f"{PB}/api/collections/measurements_2026", headers=SU).status_code))
 dangling = json.load(open(os.path.join(WORK, "sb2pb-report.json")))["migration"]["files"]["danglingRelations"]
 check("Data", "dangling relations after load", 0, sum(dangling.values()))
 
